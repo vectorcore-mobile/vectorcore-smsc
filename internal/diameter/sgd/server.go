@@ -2,6 +2,17 @@
 // IP-SM-GW operation. It handles inbound OFR (MO) requests from the MME,
 // correlates answers to outbound TFR (MT) sends, and sends RSR
 // (delivery report) and Alert-SC back.
+//
+// Naming note: 3GPP TS 29.338 calls MO-Forward-Short-Message "OFR/OFA" and
+// MT-Forward-Short-Message "TFR/TFA". Several identifiers in this codebase use
+// the two names the other way round:
+//
+//	SendOFR, EncodeOFR, buildOFRRequest, OFAResultError → MT-Forward (3GPP TFR/TFA)
+//	HandleTFR, DecodeTFR, EncodeTFR                     → MO-Forward (3GPP OFR)
+//
+// The Diameter command codes (dcodec.CmdMTForwardShortMessage,
+// dcodec.CmdMOForwardShortMessage) are authoritative; log messages keep the
+// historical names.
 package sgd
 
 import (
@@ -19,7 +30,12 @@ import (
 )
 
 const gracefulStopTimeout = 5 * time.Second
-const ofrTimeout = 5 * time.Second
+
+// DefaultTFATimeout is how long SendOFR waits for the MME's
+// MT-Forward-Short-Message-Answer. It covers paging the UE and the NAS
+// round trip, so it must comfortably exceed typical MME paging timers.
+const DefaultTFATimeout = 30 * time.Second
+
 // OnMessageFunc is called for each decoded MO/MT message.
 type OnMessageFunc func(msg *codec.Message, peerName string)
 
@@ -34,6 +50,7 @@ type Server struct {
 	localFQDN      string
 	localRealm     string
 	scAddrEncoding string
+	tfaTimeout     time.Duration
 	onMsg          OnMessageFunc
 	onAlertSC      OnAlertServiceCentreFunc
 
@@ -67,6 +84,7 @@ func NewServer(transport, listenAddr, localFQDN, localRealm, scAddrEncoding stri
 		localFQDN:      localFQDN,
 		localRealm:     localRealm,
 		scAddrEncoding: scAddrEncoding,
+		tfaTimeout:     DefaultTFATimeout,
 		onMsg:          onMsg,
 		peers:          make(map[string]*diameter.Peer),
 		outboundPeers:  make(map[string]*diameter.Peer),
@@ -245,6 +263,17 @@ func (s *Server) SetOnMessage(fn OnMessageFunc) {
 	s.mu.Unlock()
 }
 
+// SetTFATimeout sets how long SendOFR waits for the MT-Forward answer.
+// Non-positive values keep the current timeout.
+func (s *Server) SetTFATimeout(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.tfaTimeout = d
+	s.mu.Unlock()
+}
+
 // SetOnAlertServiceCentre sets the callback for inbound SGd ALR requests.
 func (s *Server) SetOnAlertServiceCentre(fn OnAlertServiceCentreFunc) {
 	s.mu.Lock()
@@ -257,6 +286,7 @@ func (s *Server) SetOnAlertServiceCentre(fn OnAlertServiceCentreFunc) {
 func (s *Server) SendOFR(ctx context.Context, msg *codec.Message, mmeHost, scAddr string) error {
 	s.mu.RLock()
 	p, viaProxy := s.selectPeerForMMELocked(mmeHost)
+	tfaTimeout := s.tfaTimeout
 	s.mu.RUnlock()
 	if p == nil {
 		return fmt.Errorf("sgd: no active peer for MME %q", mmeHost)
@@ -275,12 +305,25 @@ func (s *Server) SendOFR(ctx context.Context, msg *codec.Message, mmeHost, scAdd
 	if err := p.Send(req); err != nil {
 		return fmt.Errorf("sgd OFR send: %w", err)
 	}
-	slog.Info("sgd OFR sent", "mme", mmeHost, "dst", msg.Destination.MSISDN, "via_proxy", viaProxy, "peer", peerLogName(p))
+	slog.Info("sgd OFR sent",
+		"id", msg.ID,
+		"kind", msg.KindOrDefault(),
+		"ref_id", msg.RefMessageID,
+		"tp_mr", msg.TPMR,
+		"mme", mmeHost,
+		"dst", msg.Destination.MSISDN,
+		"via_proxy", viaProxy,
+		"peer", peerLogName(p),
+		"hop_by_hop", req.Header.HopByHop,
+	)
 
 	select {
 	case ans := <-replyCh:
 		resultCode := resultCode(ans)
 		slog.Debug("sgd OFA received",
+			"id", msg.ID,
+			"kind", msg.KindOrDefault(),
+			"ref_id", msg.RefMessageID,
 			"mme", mmeHost,
 			"dst", msg.Destination.MSISDN,
 			"via_proxy", viaProxy,
@@ -292,8 +335,17 @@ func (s *Server) SendOFR(ctx context.Context, msg *codec.Message, mmeHost, scAdd
 			return &OFAResultError{ResultCode: resultCode}
 		}
 		return nil
-	case <-time.After(ofrTimeout):
-		return fmt.Errorf("sgd: OFA timeout after %s", ofrTimeout)
+	case <-time.After(tfaTimeout):
+		slog.Warn("sgd OFA timeout",
+			"id", msg.ID,
+			"kind", msg.KindOrDefault(),
+			"ref_id", msg.RefMessageID,
+			"mme", mmeHost,
+			"dst", msg.Destination.MSISDN,
+			"hop_by_hop", req.Header.HopByHop,
+			"timeout", tfaTimeout,
+		)
+		return fmt.Errorf("sgd: OFA timeout after %s", tfaTimeout)
 	}
 }
 

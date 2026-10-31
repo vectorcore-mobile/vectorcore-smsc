@@ -67,6 +67,9 @@ func (s *Sender) Send(ctx context.Context, msg *codec.Message, reg *registry.Reg
 				continue
 			}
 			slog.Info("ISC MT delivered",
+				"id", msg.ID,
+				"kind", msg.KindOrDefault(),
+				"ref_id", msg.RefMessageID,
 				"dst", msg.Destination.MSISDN,
 				"scscf", reg.SCSCF,
 				"status", code,

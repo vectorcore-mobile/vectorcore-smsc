@@ -3,6 +3,7 @@ package sgd
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/svinson1121/vectorcore-smsc/internal/codec"
 	sgdcodec "github.com/svinson1121/vectorcore-smsc/internal/codec/sgd"
@@ -174,5 +175,55 @@ func TestBuildOFRRequestEncodesSCAddressAsASCIIDigitsWhenConfigured(t *testing.T
 	want := []byte("15550000000")
 	if !bytes.Equal(scAddr.Data, want) {
 		t.Fatalf("SC-Address bytes = %x, want %x", scAddr.Data, want)
+	}
+}
+
+func TestBuildOFRRequestCarriesStatusReportForOriginalSender(t *testing.T) {
+	scts := time.Date(2026, 10, 30, 17, 52, 38, 0, time.UTC)
+	dt := time.Date(2026, 10, 30, 17, 52, 45, 0, time.UTC)
+	report, err := tpdu.EncodeStatusReport(0x2A, codec.Address{MSISDN: "989100000111"}, scts, dt, tpdu.STReceivedBySME)
+	if err != nil {
+		t.Fatalf("EncodeStatusReport() error = %v", err)
+	}
+
+	canonical := &codec.Message{
+		Kind:    codec.MessageKindStatusReport,
+		RawTPDU: report,
+	}
+	canonical.Destination.MSISDN = "989100000555"
+	canonical.Destination.IMSI = "432600000000555"
+	canonical.Destination.MMENumber = "15550000001"
+
+	avps, err := sgdcodec.EncodeOFR(canonical, "+15550000000", "tbcd")
+	if err != nil {
+		t.Fatalf("EncodeOFR() error = %v", err)
+	}
+	msg := buildOFRRequest("smsc.example.net", "example.net", "mme-a.epc.example.net", "epc.example.net", avps)
+
+	if got, want := msg.Header.CommandCode, dcodec.CmdMTForwardShortMessage; got != want {
+		t.Fatalf("command = %d, want %d (MT-Forward-Short-Message)", got, want)
+	}
+	avp := msg.FindAVP(dcodec.CodeSMRPUI, dcodec.Vendor3GPP)
+	if avp == nil {
+		t.Fatal("missing SM-RP-UI")
+	}
+	if !bytes.Equal(avp.Data, report) {
+		t.Fatalf("SM-RP-UI = % X, want status report % X", avp.Data, report)
+	}
+	decoded, err := tpdu.Decode(avp.Data)
+	if err != nil {
+		t.Fatalf("decode SM-RP-UI: %v", err)
+	}
+	if decoded.TPMR != 0x2A || decoded.TPStatus != tpdu.STReceivedBySME || decoded.Source.MSISDN != "989100000111" {
+		t.Fatalf("decoded report = MR 0x%02X ST 0x%02X RA %q", decoded.TPMR, decoded.TPStatus, decoded.Source.MSISDN)
+	}
+	if avp := msg.FindAVP(dcodec.CodeUserName, 0); avp == nil || string(avp.Data) != "432600000000555" {
+		t.Fatalf("User-Name = %v, want original sender IMSI 432600000000555", avp)
+	}
+	if msg.FindAVP(dcodec.CodeMMENumberForMTSMSServing, dcodec.Vendor3GPP) == nil {
+		t.Fatal("missing MME-Number-for-MT-SMS AVP")
+	}
+	if msg.FindAVP(dcodec.CodeSCAddress, dcodec.Vendor3GPP) == nil {
+		t.Fatal("missing SC-Address AVP")
 	}
 }

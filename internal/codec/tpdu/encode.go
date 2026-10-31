@@ -7,6 +7,21 @@ import (
 	"github.com/svinson1121/vectorcore-smsc/internal/codec"
 )
 
+// EncodeMT returns the TP-DATA to send SC→MS for msg. Pre-encoded TP-DATA in
+// msg.RawTPDU (e.g. an SMS-STATUS-REPORT) is returned verbatim; otherwise an
+// SMS-DELIVER is encoded from the message fields.
+func EncodeMT(msg *codec.Message) ([]byte, error) {
+	if len(msg.RawTPDU) == 0 {
+		return EncodeDeliver(msg)
+	}
+	switch msg.RawTPDU[0] & 0x03 {
+	case mtiSMSDeliver, mtiSMSStatusReport:
+		return append([]byte(nil), msg.RawTPDU...), nil
+	default:
+		return nil, fmt.Errorf("raw TP-DATA has TP-MTI 0x%02X, not valid SC→MS", msg.RawTPDU[0]&0x03)
+	}
+}
+
 // EncodeDeliver encodes a canonical Message into an SMS-DELIVER TP-DATA byte slice.
 // SMS-DELIVER is sent MT (from SMSC to UE) per 3GPP TS 23.040 §9.2.2.1.
 func EncodeDeliver(msg *codec.Message) ([]byte, error) {
@@ -114,6 +129,43 @@ func EncodeSubmit(msg *codec.Message) ([]byte, error) {
 	// TP-UD
 	out = append(out, ud...)
 
+	return out, nil
+}
+
+// EncodeStatusReport encodes an SMS-STATUS-REPORT TP-DATA byte slice
+// (3GPP TS 23.040 §9.2.2.3), sent MT from the SC to the originator of the
+// referenced SMS-SUBMIT.
+//
+//	mr        TP-MR of the original SMS-SUBMIT
+//	recipient TP-RA: the recipient the original SM was addressed to
+//	scts      TP-SCTS: when the SC received the original SM
+//	dt        TP-DT: when the SM was delivered or the SC gave up
+//	st        TP-ST: one of the ST* constants
+//
+// No TP-PI is included, so the report carries no PID/DCS/UD.
+func EncodeStatusReport(mr byte, recipient codec.Address, scts, dt time.Time, st byte) ([]byte, error) {
+	if recipient.MSISDN == "" {
+		return nil, fmt.Errorf("encode TP-RA: recipient address required")
+	}
+	ra, err := encodeAddress(codec.Address{
+		MSISDN: recipient.MSISDN,
+		TON:    recipient.TON,
+		NPI:    recipient.NPI,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode TP-RA: %w", err)
+	}
+
+	out := make([]byte, 0, 2+len(ra)+7+7+1)
+
+	// Byte 0: TP-MTI=10 (STATUS-REPORT) | TP-MMS=1 (bit2, no more messages)
+	// TP-SRQ=0 (report is the result of an SMS-SUBMIT), TP-UDHI=0.
+	out = append(out, byte(mtiSMSStatusReport)|0x04)
+	out = append(out, mr)
+	out = append(out, ra...)
+	out = append(out, encodeSCTS(scts)...)
+	out = append(out, encodeSCTS(dt)...)
+	out = append(out, st)
 	return out, nil
 }
 

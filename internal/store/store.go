@@ -148,6 +148,20 @@ const (
 	MessageStatusExpired        = "EXPIRED"
 )
 
+// MessageKind values for the messages table.
+const (
+	MessageKindSM           = "sm"            // ordinary short message
+	MessageKindStatusReport = "status_report" // SC-generated SMS-STATUS-REPORT
+)
+
+// NormalizeMessageKind maps an unset kind to MessageKindSM.
+func NormalizeMessageKind(kind string) string {
+	if kind == "" {
+		return MessageKindSM
+	}
+	return kind
+}
+
 // Message mirrors the messages table.
 type Message struct {
 	ID                    string     `json:"id"`
@@ -175,6 +189,9 @@ type Message struct {
 	SubmittedAt           time.Time  `json:"submitted_at"`
 	ExpiryAt              *time.Time `json:"expiry_at"`
 	DeliveredAt           *time.Time `json:"delivered_at"`
+	Kind                  string     `json:"kind"`                     // MessageKind*; "" is read as MessageKindSM
+	RefMessageID          string     `json:"ref_message_id,omitempty"` // status_report: the SM being reported on
+	RawTPDU               []byte     `json:"raw_tpdu,omitempty"`       // pre-encoded TP-DATA sent verbatim on egress
 }
 
 // MessageFilter narrows list queries for operational views.

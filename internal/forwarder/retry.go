@@ -231,6 +231,11 @@ func storeToCodecMessage(m store.Message) *codec.Message {
 	if m.TPMR != nil {
 		msg.TPMR = byte(*m.TPMR)
 	}
+	msg.Kind = codec.MessageKind(store.NormalizeMessageKind(m.Kind))
+	msg.RefMessageID = m.RefMessageID
+	if len(m.RawTPDU) > 0 {
+		msg.RawTPDU = append([]byte(nil), m.RawTPDU...)
+	}
 	if m.ExpiryAt != nil {
 		t := *m.ExpiryAt
 		msg.Expiry = &t

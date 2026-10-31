@@ -24,7 +24,7 @@ func encodeForwardSM(msg *codec.Message, scAddr, scAddrEncoding string, mti int)
 	var tpData []byte
 	var err error
 	if mti == dcodec.SMRPMTIDeliver {
-		tpData, err = tpdu.EncodeDeliver(msg)
+		tpData, err = tpdu.EncodeMT(msg)
 	} else {
 		tpData, err = tpdu.EncodeSubmit(msg)
 	}

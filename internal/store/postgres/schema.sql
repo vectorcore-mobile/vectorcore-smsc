@@ -140,7 +140,10 @@ CREATE TABLE IF NOT EXISTS messages (
     dr_required      BOOLEAN NOT NULL DEFAULT false,
     submitted_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     expiry_at        TIMESTAMPTZ,
-    delivered_at     TIMESTAMPTZ
+    delivered_at     TIMESTAMPTZ,
+    kind             TEXT NOT NULL DEFAULT 'sm',
+    ref_message_id   UUID,
+    raw_tpdu         BYTEA
 );
 
 CREATE TABLE IF NOT EXISTS message_segments (

@@ -632,6 +632,12 @@ func (f *Forwarder) resolveCandidateAt(ctx context.Context, msg *codec.Message, 
 }
 
 func (f *Forwarder) fallbackDecisions(msg *codec.Message) []routing.Decision {
+	// An SMS-STATUS-REPORT is a TPDU for the originating handset; it can only
+	// be delivered over a TPDU-carrying interface (ISC or SGd), never via the
+	// SMPP / SIP SIMPLE fallback rules.
+	if msg.Kind == codec.MessageKindStatusReport {
+		return nil
+	}
 	decisions, err := f.engine.RouteAll(msg)
 	if err != nil {
 		return nil
@@ -816,6 +822,7 @@ func (f *Forwarder) persistMessage(ctx context.Context, msg *codec.Message,
 
 	sm := store.Message{
 		ID:                 msg.ID,
+		TPMR:               tpmrForStore(msg),
 		OriginIface:        string(msg.IngressInterface),
 		OriginPeer:         msg.IngressPeer,
 		SMPPMsgID:          msg.SMPPMsgID,
@@ -832,6 +839,11 @@ func (f *Forwarder) persistMessage(ctx context.Context, msg *codec.Message,
 		DRRequired:         msg.TPSRRequired,
 		SubmittedAt:        now,
 		ExpiryAt:           expiry,
+		Kind:               store.NormalizeMessageKind(string(msg.Kind)),
+		RefMessageID:       msg.RefMessageID,
+	}
+	if len(msg.RawTPDU) > 0 {
+		sm.RawTPDU = append([]byte(nil), msg.RawTPDU...)
 	}
 	switch msg.Encoding {
 	case codec.EncodingBinary:
@@ -851,6 +863,19 @@ func (f *Forwarder) persistMessage(ctx context.Context, msg *codec.Message,
 	}
 	if err := f.st.SaveMessage(ctx, sm); err != nil {
 		slog.Error("forwarder: persist message failed", "id", msg.ID, "err", err)
+	}
+}
+
+// tpmrForStore returns the TP-MR to persist, or nil when the ingress interface
+// does not carry an SMS-SUBMIT TPDU (so NULL means "no TP-MR", not MR=0).
+// The stored TP-MR is required to build an SMS-STATUS-REPORT for the sender.
+func tpmrForStore(msg *codec.Message) *int {
+	switch msg.IngressInterface {
+	case codec.InterfaceSGd, codec.InterfaceSIP3GPP:
+		mr := int(msg.TPMR)
+		return &mr
+	default:
+		return nil
 	}
 }
 

@@ -16,8 +16,9 @@ func (db *DB) SaveMessage(ctx context.Context, msg store.Message) error {
 				egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 				alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 				payload, udh, encoding, dcs, status, retry_count,
-				next_retry_at, dr_required, submitted_at, expiry_at
-			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+				next_retry_at, dr_required, submitted_at, expiry_at,
+				kind, ref_message_id, raw_tpdu
+			) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 	_, err := db.db.ExecContext(ctx, q,
 		msg.ID, msg.TPMR, msg.SMPPMsgID, msg.OriginIface, msg.OriginPeer,
 		msg.EgressIface, msg.EgressPeer, msg.RouteCursor, msg.SrcMSISDN, msg.DstMSISDN,
@@ -27,6 +28,9 @@ func (db *DB) SaveMessage(ctx context.Context, msg store.Message) error {
 		boolInt(msg.DRRequired),
 		msg.SubmittedAt.UTC().Format(time.RFC3339),
 		nullableTime(msg.ExpiryAt),
+		store.NormalizeMessageKind(msg.Kind),
+		nullableString(msg.RefMessageID),
+		msg.RawTPDU,
 	)
 	if err != nil {
 		return fmt.Errorf("save message %s: %w", msg.ID, err)
@@ -158,16 +162,20 @@ func (db *DB) RequeueMessageForAlert(ctx context.Context, id string, nextRetryAt
 	return rows > 0, nil
 }
 
+// Timestamps are stored as RFC3339 ("2006-01-02T15:04:05Z"), which does not
+// compare correctly as text against datetime('now') ("2006-01-02 15:04:05"),
+// so due-time checks compare julianday() values instead.
 func (db *DB) ListRetryableMessages(ctx context.Context) ([]store.Message, error) {
 	const q = `
 			SELECT id, tp_mr, smpp_msgid, origin_iface, origin_peer,
 			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-			       dr_required, submitted_at, expiry_at
+			       dr_required, submitted_at, expiry_at,
+			       kind, ref_message_id, raw_tpdu, delivered_at
 		FROM messages
 		WHERE status IN ('QUEUED','WAIT_TIMER','WAIT_TIMER_EVENT')
-		  AND (next_retry_at IS NULL OR next_retry_at <= datetime('now'))
+		  AND (next_retry_at IS NULL OR julianday(next_retry_at) <= julianday('now'))
 		ORDER BY next_retry_at ASC LIMIT 100`
 	return sqliteScanMessages(db, ctx, q)
 }
@@ -178,10 +186,11 @@ func (db *DB) ListExpiredMessages(ctx context.Context) ([]store.Message, error) 
 			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-			       dr_required, submitted_at, expiry_at
+			       dr_required, submitted_at, expiry_at,
+			       kind, ref_message_id, raw_tpdu, delivered_at
 		FROM messages
 		WHERE status IN ('QUEUED','WAIT_TIMER','WAIT_EVENT','WAIT_TIMER_EVENT')
-		  AND expiry_at IS NOT NULL AND expiry_at <= datetime('now')
+		  AND expiry_at IS NOT NULL AND julianday(expiry_at) <= julianday('now')
 		LIMIT 100`
 	return sqliteScanMessages(db, ctx, q)
 }
@@ -192,7 +201,8 @@ func (db *DB) GetMessage(ctx context.Context, id string) (*store.Message, error)
 			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-		       dr_required, submitted_at, expiry_at
+		       dr_required, submitted_at, expiry_at,
+			       kind, ref_message_id, raw_tpdu, delivered_at
 		FROM messages WHERE id=?`
 	msgs, err := sqliteScanMessages(db, ctx, q, id)
 	if err != nil {
@@ -223,10 +233,11 @@ func sqliteScanMessages(db *DB, ctx context.Context, q string, args ...any) ([]s
 	for rows.Next() {
 		var m store.Message
 		var drInt int
-		var nextRetryStr, submittedStr, expiryStr *string
+		var nextRetryStr, submittedStr, expiryStr, deliveredStr *string
 		var tpmr *int
 		var encoding *int
 		var dcs *int
+		var kind, refMessageID *string
 
 		err := rows.Scan(
 			&m.ID, &tpmr, &m.SMPPMsgID, &m.OriginIface, &m.OriginPeer,
@@ -235,6 +246,7 @@ func sqliteScanMessages(db *DB, ctx context.Context, q string, args ...any) ([]s
 			&m.Payload, &m.UDH, &encoding, &dcs, &m.Status,
 			&m.RetryCount, &nextRetryStr,
 			&drInt, &submittedStr, &expiryStr,
+			&kind, &refMessageID, &m.RawTPDU, &deliveredStr,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
@@ -247,6 +259,13 @@ func sqliteScanMessages(db *DB, ctx context.Context, q string, args ...any) ([]s
 			m.DCS = *dcs
 		}
 		m.DRRequired = drInt != 0
+		m.Kind = store.MessageKindSM
+		if kind != nil {
+			m.Kind = store.NormalizeMessageKind(*kind)
+		}
+		if refMessageID != nil {
+			m.RefMessageID = *refMessageID
+		}
 		if submittedStr != nil {
 			m.SubmittedAt, _ = time.Parse(time.RFC3339, *submittedStr)
 		}
@@ -257,6 +276,11 @@ func sqliteScanMessages(db *DB, ctx context.Context, q string, args ...any) ([]s
 		if expiryStr != nil {
 			t, _ := time.Parse(time.RFC3339, *expiryStr)
 			m.ExpiryAt = &t
+		}
+		if deliveredStr != nil {
+			if t, err := time.Parse(time.RFC3339, *deliveredStr); err == nil {
+				m.DeliveredAt = &t
+			}
 		}
 		msgs = append(msgs, m)
 	}
@@ -291,7 +315,8 @@ func (db *DB) ListMessages(ctx context.Context, limit int) ([]store.Message, err
 			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-			       dr_required, submitted_at, expiry_at
+			       dr_required, submitted_at, expiry_at,
+			       kind, ref_message_id, raw_tpdu, delivered_at
 	FROM messages ORDER BY submitted_at DESC LIMIT ?`
 	return sqliteScanMessages(db, ctx, q, limit)
 }
@@ -344,7 +369,8 @@ func (db *DB) ListFilteredMessages(ctx context.Context, filter store.MessageFilt
 			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-			       dr_required, submitted_at, expiry_at
+			       dr_required, submitted_at, expiry_at,
+			       kind, ref_message_id, raw_tpdu, delivered_at
 		FROM messages`
 	if len(conds) > 0 {
 		q += "\n\t\tWHERE " + strings.Join(conds, " AND ")
@@ -408,6 +434,14 @@ func (db *DB) SaveDeliveryReport(ctx context.Context, dr store.DeliveryReport) e
 		return fmt.Errorf("save delivery_report: %w", err)
 	}
 	return nil
+}
+
+// nullableString stores an empty string as NULL.
+func nullableString(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
 }
 
 // nullableTime converts a *time.Time to a string for SQLite, or nil.

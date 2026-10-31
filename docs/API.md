@@ -446,6 +446,9 @@ Representative message fields:
 - `submitted_at`
 - `expiry_at`
 - `delivered_at`
+- `kind` — `sm` for ordinary messages, `status_report` for SMSC-generated SMS-STATUS-REPORTs
+- `ref_message_id` — `status_report` only: the `id` of the message being reported on
+- `raw_tpdu` — pre-encoded TP-DATA sent verbatim on egress (base64), when set
 
 Example queue query:
 

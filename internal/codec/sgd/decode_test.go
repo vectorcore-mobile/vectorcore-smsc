@@ -74,3 +74,78 @@ func TestEncodeSCAddressUsesASCIIDigitsWhenConfigured(t *testing.T) {
 		t.Fatalf("encodeSCAddress() = %x, want %x", got, want)
 	}
 }
+
+func buildUserIdentifierRequest(t *testing.T, tpData []byte, imsi, msisdn string) *dcodec.Message {
+	t.Helper()
+	uid, err := dcodec.NewGrouped(
+		dcodec.CodeUserIdentifier,
+		dcodec.Vendor3GPP,
+		dcodec.FlagMandatory|dcodec.FlagVendorSpecific,
+		[]*dcodec.AVP{
+			dcodec.NewString(dcodec.CodeUserName, 0, dcodec.FlagMandatory, imsi),
+			dcodec.NewOctetString(dcodec.CodeMSISDN, dcodec.Vendor3GPP,
+				dcodec.FlagMandatory|dcodec.FlagVendorSpecific, encodeBCDMSISDN(msisdn)),
+		},
+	)
+	if err != nil {
+		t.Fatalf("NewGrouped() error = %v", err)
+	}
+	wire := dcodec.NewRequest(dcodec.CmdMOForwardShortMessage, dcodec.App3GPP_SGd)
+	wire.Add(
+		dcodec.NewOctetString(dcodec.CodeSMRPUI, dcodec.Vendor3GPP,
+			dcodec.FlagMandatory|dcodec.FlagVendorSpecific, tpData),
+		uid,
+	)
+	return wire.Build()
+}
+
+func TestDecodeTFRAttributesUserIdentifierIMSIToSourceForSubmit(t *testing.T) {
+	tpData, err := tpdu.EncodeSubmit(&codec.Message{
+		Destination: codec.Address{MSISDN: "989100000111"},
+		Text:        "test",
+		Encoding:    codec.EncodingGSM7,
+		TPMR:        0x2A,
+	})
+	if err != nil {
+		t.Fatalf("EncodeSubmit() error = %v", err)
+	}
+
+	decoded, err := DecodeTFR(buildUserIdentifierRequest(t, tpData, "432600000000555", "989100000555"))
+	if err != nil {
+		t.Fatalf("DecodeTFR() error = %v", err)
+	}
+	if got, want := decoded.Source.IMSI, "432600000000555"; got != want {
+		t.Fatalf("Source.IMSI = %q, want %q", got, want)
+	}
+	if got := decoded.Destination.IMSI; got != "" {
+		t.Fatalf("Destination.IMSI = %q, want empty", got)
+	}
+	if got, want := decoded.Source.MSISDN, "989100000555"; got != want {
+		t.Fatalf("Source.MSISDN = %q, want %q", got, want)
+	}
+	if got, want := decoded.TPMR, byte(0x2A); got != want {
+		t.Fatalf("TPMR = 0x%02X, want 0x%02X", got, want)
+	}
+}
+
+func TestDecodeOFRAttributesUserIdentifierIMSIToDestinationForDeliver(t *testing.T) {
+	tpData, err := tpdu.EncodeDeliver(&codec.Message{
+		Source:   codec.Address{MSISDN: "989100000555"},
+		Text:     "test",
+		Encoding: codec.EncodingGSM7,
+	})
+	if err != nil {
+		t.Fatalf("EncodeDeliver() error = %v", err)
+	}
+
+	decoded, err := DecodeOFR(buildUserIdentifierRequest(t, tpData, "432600000000111", "989100000111"))
+	if err != nil {
+		t.Fatalf("DecodeOFR() error = %v", err)
+	}
+	if got, want := decoded.Destination.IMSI, "432600000000111"; got != want {
+		t.Fatalf("Destination.IMSI = %q, want %q", got, want)
+	}
+	if got := decoded.Source.IMSI; got != "" {
+		t.Fatalf("Source.IMSI = %q, want empty", got)
+	}
+}

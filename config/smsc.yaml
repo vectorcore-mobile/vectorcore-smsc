@@ -2,6 +2,7 @@ smsc:
   address: "+15550000000"  # SMSC E.164 / GT 
   sgd_sc_address_encoding: ascii_digits  # tbcd | ascii_digits
   max_queue_lifetime: 168h  # global max queued/waiting lifetime before expiry
+  sgd_tfa_timeout: 30s      # wait for the MME's MT-Forward answer (covers UE paging)
 
 numbering:
   default_country_code: "1"

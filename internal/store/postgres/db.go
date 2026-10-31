@@ -67,6 +67,9 @@ func Open(ctx context.Context, dsn string) (*DB, error) {
 	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS deferred_interface TEXT`)
 	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS serving_node_at_deferral TEXT`)
 	pool.Exec(ctx, `ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS mme_number TEXT`)
+	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'sm'`)
+	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS ref_message_id UUID`)
+	pool.Exec(ctx, `ALTER TABLE messages ADD COLUMN IF NOT EXISTS raw_tpdu BYTEA`)
 	pool.Exec(ctx, `UPDATE smpp_server_accounts
 		SET default_route_id = NULL
 		WHERE default_route_id IN (SELECT id FROM routing_rules WHERE egress_iface = 'sgd')`)

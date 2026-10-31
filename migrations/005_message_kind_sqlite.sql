@@ -1,0 +1,3 @@
+ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'sm';
+ALTER TABLE messages ADD COLUMN ref_message_id TEXT;
+ALTER TABLE messages ADD COLUMN raw_tpdu BLOB;

@@ -11,14 +11,14 @@ import (
 // Encode serialises a canonical Message into an application/vnd.3gpp.sms
 // RP-DATA body ready for use as a SIP MESSAGE body on the ISC interface.
 //
-// The message is encoded as SMS-DELIVER (MT direction, SC→MS).
+// The message is encoded as SMS-DELIVER (MT direction, SC→MS), or carries
+// msg.RawTPDU verbatim when set (e.g. an SMS-STATUS-REPORT).
 // rpMR is the RP message reference to use (caller manages sequence).
 // scAddr is the SMSC address to set as RP-OA (may be empty).
 func Encode(msg *codec.Message, rpMR byte, scAddr string) ([]byte, error) {
-	// Encode TP-DATA as SMS-DELIVER
-	tpData, err := tpdu.EncodeDeliver(msg)
+	tpData, err := tpdu.EncodeMT(msg)
 	if err != nil {
-		return nil, fmt.Errorf("encode TP-DELIVER: %w", err)
+		return nil, fmt.Errorf("encode MT TP-DATA: %w", err)
 	}
 
 	// Build RP-DATA (SC→MS)

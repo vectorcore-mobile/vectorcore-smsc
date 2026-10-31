@@ -1,6 +1,7 @@
 package forwarder
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -356,12 +357,14 @@ func (f *fakeS6cClient) LookupRouting(msisdn string) (*s6c.RoutingInfo, error) {
 type fakeSGdSender struct {
 	lastSCAddr string
 	lastMME    string
+	lastMsg    *codec.Message
 	err        error
 }
 
-func (f *fakeSGdSender) SendOFR(_ context.Context, _ *codec.Message, mmeHost, scAddr string) error {
+func (f *fakeSGdSender) SendOFR(_ context.Context, msg *codec.Message, mmeHost, scAddr string) error {
 	f.lastMME = mmeHost
 	f.lastSCAddr = scAddr
+	f.lastMsg = msg
 	return f.err
 }
 func (f *fakeSGdSender) HasPeerForMME(string) bool { return true }
@@ -1149,5 +1152,232 @@ func TestDispatchAppliesSFPolicyVPOverrideToFallbackSend(t *testing.T) {
 	got := *simpleSender.msgs[0].ValidityPeriod
 	if got < (30*time.Minute-time.Second) || got > (30*time.Minute+time.Second) {
 		t.Fatalf("captured validity period = %v, want about 30m", got)
+	}
+}
+
+func TestDispatchPersistsTPMRForTPDUOrigins(t *testing.T) {
+	cases := []struct {
+		name    string
+		ingress codec.InterfaceType
+		want    *int
+	}{
+		{name: "sgd", ingress: codec.InterfaceSGd, want: intPtrForTest(0x2A)},
+		{name: "sip3gpp", ingress: codec.InterfaceSIP3GPP, want: intPtrForTest(0x2A)},
+		{name: "smpp", ingress: codec.InterfaceSMPP, want: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &forwarderTestStore{}
+			reg := newTestRegistry(t, st)
+			reg.SetS6cClient(&fakeS6cClient{info: &s6c.RoutingInfo{Attached: false}})
+
+			f := New(Config{
+				Registry:         reg,
+				Engine:           routing.NewEngine(),
+				Store:            st,
+				SGdSender:        &fakeSGdSender{},
+				MaxQueueLifetime: time.Hour,
+			})
+
+			f.Dispatch(context.Background(), &codec.Message{
+				ID:               "msg-tpmr-" + tc.name,
+				IngressInterface: tc.ingress,
+				TPMR:             0x2A,
+				Source:           codec.Address{MSISDN: "989100000555"},
+				Destination:      codec.Address{MSISDN: "989100000111"},
+			})
+
+			if st.saved == nil {
+				t.Fatal("expected message to be persisted")
+			}
+			switch {
+			case tc.want == nil && st.saved.TPMR != nil:
+				t.Fatalf("TPMR = %d, want nil", *st.saved.TPMR)
+			case tc.want != nil && st.saved.TPMR == nil:
+				t.Fatalf("TPMR = nil, want %d", *tc.want)
+			case tc.want != nil && *st.saved.TPMR != *tc.want:
+				t.Fatalf("TPMR = %d, want %d", *st.saved.TPMR, *tc.want)
+			}
+		})
+	}
+}
+
+func TestStoreToCodecMessageRestoresTPMR(t *testing.T) {
+	msg := storeToCodecMessage(store.Message{ID: "m1", TPMR: intPtrForTest(0x2A)})
+	if got, want := msg.TPMR, byte(0x2A); got != want {
+		t.Fatalf("TPMR = 0x%02X, want 0x%02X", got, want)
+	}
+}
+
+func intPtrForTest(v int) *int { return &v }
+
+func TestDispatchPersistsMessageKindFields(t *testing.T) {
+	st := &forwarderTestStore{}
+	reg := newTestRegistry(t, st)
+	reg.SetS6cClient(&fakeS6cClient{info: &s6c.RoutingInfo{Attached: false}})
+	f := New(Config{
+		Registry:         reg,
+		Engine:           routing.NewEngine(),
+		Store:            st,
+		SGdSender:        &fakeSGdSender{},
+		MaxQueueLifetime: time.Hour,
+	})
+
+	raw := []byte{0x06, 0x2A}
+	in := &codec.Message{
+		ID:           "sr-1",
+		Kind:         codec.MessageKindStatusReport,
+		RefMessageID: "orig-1",
+		RawTPDU:      raw,
+		Destination:  codec.Address{MSISDN: "989100000555"},
+	}
+	f.Dispatch(context.Background(), in)
+
+	if st.saved == nil {
+		t.Fatal("expected message to be persisted")
+	}
+	if st.saved.Kind != store.MessageKindStatusReport || st.saved.RefMessageID != "orig-1" || !bytes.Equal(st.saved.RawTPDU, raw) {
+		t.Fatalf("saved = kind %q ref %q raw % X", st.saved.Kind, st.saved.RefMessageID, st.saved.RawTPDU)
+	}
+	in.RawTPDU[0] = 0xFF
+	if st.saved.RawTPDU[0] != 0x06 {
+		t.Fatal("persisted RawTPDU aliases the caller's slice")
+	}
+
+	st = &forwarderTestStore{}
+	reg = newTestRegistry(t, st)
+	reg.SetS6cClient(&fakeS6cClient{info: &s6c.RoutingInfo{Attached: false}})
+	f = New(Config{Registry: reg, Engine: routing.NewEngine(), Store: st, SGdSender: &fakeSGdSender{}, MaxQueueLifetime: time.Hour})
+	f.Dispatch(context.Background(), &codec.Message{ID: "sm-1", Destination: codec.Address{MSISDN: "989100000111"}})
+	if st.saved.Kind != store.MessageKindSM {
+		t.Fatalf("default Kind = %q, want %q", st.saved.Kind, store.MessageKindSM)
+	}
+}
+
+func TestStoreToCodecMessageRestoresKindFields(t *testing.T) {
+	raw := []byte{0x06, 0x2A}
+	msg := storeToCodecMessage(store.Message{
+		ID: "sr-1", Kind: store.MessageKindStatusReport, RefMessageID: "orig-1", RawTPDU: raw,
+	})
+	if msg.Kind != codec.MessageKindStatusReport || msg.RefMessageID != "orig-1" || !bytes.Equal(msg.RawTPDU, raw) {
+		t.Fatalf("restored = kind %q ref %q raw % X", msg.Kind, msg.RefMessageID, msg.RawTPDU)
+	}
+
+	if got := storeToCodecMessage(store.Message{ID: "legacy"}).Kind; got != codec.MessageKindSM {
+		t.Fatalf("legacy Kind = %q, want %q", got, codec.MessageKindSM)
+	}
+}
+
+func TestSelectRouteNeverUsesFallbackRulesForStatusReport(t *testing.T) {
+	newForwarder := func() (*Forwarder, *fakeS6cClient) {
+		st := &forwarderTestStore{sipPeers: map[string]store.SIPPeer{"simple1": {Name: "simple1"}}}
+		reg := newTestRegistry(t, st)
+		s6cClient := &fakeS6cClient{info: &s6c.RoutingInfo{Attached: false}}
+		reg.SetS6cClient(s6cClient)
+		engine := routing.NewEngine()
+		engine.Reload([]store.RoutingRule{
+			{Name: "simple-any", Priority: 10, MatchDstPrefix: "989", EgressIface: "sipsimple", EgressPeer: "simple1"},
+		})
+		return New(Config{
+			Registry:     reg,
+			Engine:       engine,
+			Store:        st,
+			SimpleSender: &fakeSimpleSender{},
+			SGdSender:    &fakeSGdSender{},
+		}), s6cClient
+	}
+
+	// Control: an ordinary SM to the same unattached subscriber falls back to SIP SIMPLE.
+	f, _ := newForwarder()
+	route, err := f.selectRoute(context.Background(), &codec.Message{
+		Destination: codec.Address{MSISDN: "989100000555"},
+	}, 0)
+	if err != nil || route == nil || route.egressIface != "sipsimple" {
+		t.Fatalf("SM selectRoute() = %+v, %v; want sipsimple", route, err)
+	}
+
+	// A status report must not use the fallback rule.
+	f, _ = newForwarder()
+	route, err = f.selectRoute(context.Background(), &codec.Message{
+		Kind:        codec.MessageKindStatusReport,
+		RawTPDU:     []byte{0x06, 0x2A},
+		Destination: codec.Address{MSISDN: "989100000555"},
+	}, 0)
+	if err == nil {
+		t.Fatalf("status report selectRoute() = %+v, want no usable route", route)
+	}
+}
+
+func TestDispatchSendsStatusReportRawTPDUViaSGd(t *testing.T) {
+	st := &forwarderTestStore{}
+	reg := newTestRegistry(t, st)
+	reg.SetS6cClient(&fakeS6cClient{info: &s6c.RoutingInfo{
+		IMSI:      "432600000000555",
+		Attached:  true,
+		MMEName:   "mme-a.epc.example.net",
+		MMENumber: "15550000001",
+	}})
+	sgd := &fakeSGdSender{}
+	f := New(Config{
+		Registry:         reg,
+		Engine:           routing.NewEngine(),
+		Store:            st,
+		SGdSender:        sgd,
+		MaxQueueLifetime: time.Hour,
+	})
+
+	raw := []byte{0x06, 0x2A, 0x0C, 0x91, 0x89, 0x19, 0x00, 0x00, 0x10, 0x11}
+	f.Dispatch(context.Background(), &codec.Message{
+		ID:           "sr-1",
+		Kind:         codec.MessageKindStatusReport,
+		RefMessageID: "orig-1",
+		RawTPDU:      raw,
+		Destination:  codec.Address{MSISDN: "989100000555"},
+	})
+
+	if sgd.lastMsg == nil {
+		t.Fatal("expected status report to be sent via SGd")
+	}
+	if got, want := sgd.lastMME, "mme-a.epc.example.net"; got != want {
+		t.Fatalf("MME = %q, want %q", got, want)
+	}
+	if got, want := sgd.lastMsg.Destination.IMSI, "432600000000555"; got != want {
+		t.Fatalf("Destination.IMSI = %q, want %q (the original sender)", got, want)
+	}
+	if !bytes.Equal(sgd.lastMsg.RawTPDU, raw) {
+		t.Fatalf("RawTPDU = % X, want % X", sgd.lastMsg.RawTPDU, raw)
+	}
+}
+
+func TestDispatchDoesNotRenormalizeStatusReportDestination(t *testing.T) {
+	st := &forwarderTestStore{}
+	reg := newTestRegistry(t, st)
+	reg.SetS6cClient(&fakeS6cClient{info: &s6c.RoutingInfo{Attached: false}})
+	f := New(Config{
+		Registry:            reg,
+		Engine:              routing.NewEngine(),
+		Store:               st,
+		SGdSender:           &fakeSGdSender{},
+		MaxQueueLifetime:    time.Hour,
+		DefaultCountryCode:  "98",
+		LocalNationalLength: 12, // same length as the sender's international number
+	})
+
+	f.Dispatch(context.Background(), &codec.Message{
+		ID:               "sr-1",
+		Kind:             codec.MessageKindStatusReport,
+		IngressInterface: codec.InterfaceInternal,
+		RawTPDU:          []byte{0x06, 0x2A},
+		Destination:      codec.Address{MSISDN: "989100000555", TON: 0x01, NPI: 0x01},
+	})
+
+	if got, want := st.saved.DstMSISDN, "989100000555"; got != want {
+		t.Fatalf("DstMSISDN = %q, want %q", got, want)
+	}
+	if got, want := st.saved.OriginIface, "internal"; got != want {
+		t.Fatalf("OriginIface = %q, want %q", got, want)
+	}
+	if st.saved.TPMR != nil {
+		t.Fatalf("TPMR = %d, want nil for an internal message", *st.saved.TPMR)
 	}
 }

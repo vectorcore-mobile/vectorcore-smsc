@@ -80,3 +80,12 @@ func loadTestConfig(t *testing.T, body string) *Config {
 	}
 	return cfg
 }
+
+func TestLoadSGdTFATimeout(t *testing.T) {
+	if got := loadTestConfig(t, "smsc:\n  address: \"+15550000000\"\n").SMSC.SGdTFATimeout; got != 30*time.Second {
+		t.Fatalf("default SGdTFATimeout = %v, want 30s", got)
+	}
+	if got := loadTestConfig(t, "smsc:\n  sgd_tfa_timeout: 45s\n").SMSC.SGdTFATimeout; got != 45*time.Second {
+		t.Fatalf("SGdTFATimeout = %v, want 45s", got)
+	}
+}

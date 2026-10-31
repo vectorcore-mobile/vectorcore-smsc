@@ -16,9 +16,11 @@ func (db *DB) SaveMessage(ctx context.Context, msg store.Message) error {
 				egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 				alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 				payload, udh, encoding, dcs, status, retry_count,
-				next_retry_at, dr_required, submitted_at, expiry_at
+				next_retry_at, dr_required, submitted_at, expiry_at,
+				kind, ref_message_id, raw_tpdu
 			) VALUES (
-				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24
+				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,
+				$25,$26,$27
 			)`
 	_, err := db.pool.Exec(ctx, q,
 		msg.ID, msg.TPMR, msg.SMPPMsgID, msg.OriginIface, msg.OriginPeer,
@@ -27,6 +29,9 @@ func (db *DB) SaveMessage(ctx context.Context, msg store.Message) error {
 		msg.Payload, msg.UDH, msg.Encoding, msg.DCS, msg.Status,
 		msg.RetryCount, msg.NextRetryAt, msg.DRRequired, msg.SubmittedAt,
 		msg.ExpiryAt,
+		store.NormalizeMessageKind(msg.Kind),
+		nullableUUID(msg.RefMessageID),
+		msg.RawTPDU,
 	)
 	if err != nil {
 		return fmt.Errorf("save message %s: %w", msg.ID, err)
@@ -145,7 +150,8 @@ func (db *DB) ListRetryableMessages(ctx context.Context) ([]store.Message, error
 			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-			       dr_required, submitted_at, expiry_at
+			       dr_required, submitted_at, expiry_at,
+			       kind, ref_message_id::text, raw_tpdu, delivered_at
 		FROM messages
 		WHERE status IN ('QUEUED','WAIT_TIMER','WAIT_TIMER_EVENT')
 		  AND (next_retry_at IS NULL OR next_retry_at <= now())
@@ -160,7 +166,8 @@ func (db *DB) ListExpiredMessages(ctx context.Context) ([]store.Message, error) 
 			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-			       dr_required, submitted_at, expiry_at
+			       dr_required, submitted_at, expiry_at,
+			       kind, ref_message_id::text, raw_tpdu, delivered_at
 		FROM messages
 		WHERE status IN ('QUEUED','WAIT_TIMER','WAIT_EVENT','WAIT_TIMER_EVENT')
 		  AND expiry_at IS NOT NULL AND expiry_at <= now()
@@ -174,7 +181,8 @@ func (db *DB) GetMessage(ctx context.Context, id string) (*store.Message, error)
 			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-			       dr_required, submitted_at, expiry_at
+			       dr_required, submitted_at, expiry_at,
+			       kind, ref_message_id::text, raw_tpdu, delivered_at
 		FROM messages WHERE id = $1`
 	msgs, err := scanMessages(db, ctx, q, id)
 	if err != nil {
@@ -216,6 +224,8 @@ func scanMessages(db *DB, ctx context.Context, q string, args ...any) ([]store.M
 		var servingNodeAtDeferral *string
 		var encoding *int
 		var dcs *int
+		var kind *string
+		var refMessageID *string
 		err := rows.Scan(
 			&m.ID, &m.TPMR, &smppMsgID, &m.OriginIface, &originPeer,
 			&egressIface, &egressPeer, &m.RouteCursor, &srcMSISDN, &dstMSISDN,
@@ -223,6 +233,7 @@ func scanMessages(db *DB, ctx context.Context, q string, args ...any) ([]store.M
 			&m.Payload, &m.UDH, &encoding, &dcs, &m.Status,
 			&m.RetryCount, &m.NextRetryAt,
 			&m.DRRequired, &m.SubmittedAt, &m.ExpiryAt,
+			&kind, &refMessageID, &m.RawTPDU, &m.DeliveredAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
@@ -263,6 +274,13 @@ func scanMessages(db *DB, ctx context.Context, q string, args ...any) ([]store.M
 		if dcs != nil {
 			m.DCS = *dcs
 		}
+		m.Kind = store.MessageKindSM
+		if kind != nil {
+			m.Kind = store.NormalizeMessageKind(*kind)
+		}
+		if refMessageID != nil {
+			m.RefMessageID = *refMessageID
+		}
 		msgs = append(msgs, m)
 	}
 	return msgs, rows.Err()
@@ -296,7 +314,8 @@ func (db *DB) ListMessages(ctx context.Context, limit int) ([]store.Message, err
 			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-			       dr_required, submitted_at, expiry_at
+			       dr_required, submitted_at, expiry_at,
+			       kind, ref_message_id::text, raw_tpdu, delivered_at
 	FROM messages ORDER BY submitted_at DESC LIMIT $1`
 	return scanMessages(db, ctx, q, limit)
 }
@@ -356,7 +375,8 @@ func (db *DB) ListFilteredMessages(ctx context.Context, filter store.MessageFilt
 			       egress_iface, egress_peer, route_cursor, src_msisdn, dst_msisdn,
 			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
-			       dr_required, submitted_at, expiry_at
+			       dr_required, submitted_at, expiry_at,
+			       kind, ref_message_id::text, raw_tpdu, delivered_at
 		FROM messages`
 	if len(conds) > 0 {
 		q += "\n\t\tWHERE " + strings.Join(conds, " AND ")
@@ -417,4 +437,12 @@ func (db *DB) SaveDeliveryReport(ctx context.Context, dr store.DeliveryReport) e
 		return fmt.Errorf("save delivery_report: %w", err)
 	}
 	return nil
+}
+
+// nullableUUID stores an empty string as NULL so it is not cast to UUID.
+func nullableUUID(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
 }

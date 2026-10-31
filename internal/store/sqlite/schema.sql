@@ -144,7 +144,10 @@ CREATE TABLE IF NOT EXISTS messages (
     dr_required      INTEGER NOT NULL DEFAULT 0,
     submitted_at     TEXT NOT NULL DEFAULT (datetime('now')),
     expiry_at        TEXT,
-    delivered_at     TEXT
+    delivered_at     TEXT,
+    kind             TEXT NOT NULL DEFAULT 'sm',
+    ref_message_id   TEXT,
+    raw_tpdu         BLOB
 );
 
 CREATE TABLE IF NOT EXISTS message_segments (

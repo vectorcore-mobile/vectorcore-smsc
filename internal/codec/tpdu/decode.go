@@ -146,18 +146,20 @@ func decodeStatusReport(data []byte) (*codec.Message, error) {
 		return nil, fmt.Errorf("status report truncated")
 	}
 	// TP-SCTS (7 bytes)
+	scts := decodeSCTS(data[pos : pos+7])
 	pos += 7
 	// TP-DT (7 bytes) — discharge time
+	dt := decodeSCTS(data[pos : pos+7])
 	pos += 7
 	tpST := data[pos]
-	pos++
 
 	msg := &codec.Message{
-		TPMR:      tpmr,
-		Source:    ra,
-		Timestamp: time.Now().UTC(),
+		TPMR:          tpmr,
+		Source:        ra,
+		Timestamp:     scts,
+		DischargeTime: dt,
+		TPStatus:      tpST,
 	}
-	_ = tpST // delivery status byte — used by DR correlator
 	return msg, nil
 }
 

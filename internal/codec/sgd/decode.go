@@ -41,7 +41,13 @@ func decodeSMRPUI(msg *dcodec.Message, iface codec.InterfaceType) (*codec.Messag
 	canonical.IngressInterface = iface
 
 	imsi, msisdn := decodeUserIdentifier(msg)
-	if canonical.Destination.IMSI == "" {
+	// The User-Identifier names the served UE: the originator of an MO
+	// SMS-SUBMIT, or the recipient of an MT SMS-DELIVER.
+	if isSMSSubmit(smRPUI.Data) {
+		if canonical.Source.IMSI == "" {
+			canonical.Source.IMSI = imsi
+		}
+	} else if canonical.Destination.IMSI == "" {
 		canonical.Destination.IMSI = imsi
 	}
 
@@ -55,6 +61,11 @@ func decodeSMRPUI(msg *dcodec.Message, iface codec.InterfaceType) (*codec.Messag
 	}
 
 	return canonical, nil
+}
+
+// isSMSSubmit reports whether raw TP-DATA carries an SMS-SUBMIT (TP-MTI=01).
+func isSMSSubmit(tpData []byte) bool {
+	return len(tpData) > 0 && tpData[0]&0x03 == 0x01
 }
 
 func decodeUserIdentifier(msg *dcodec.Message) (imsi, msisdn string) {
