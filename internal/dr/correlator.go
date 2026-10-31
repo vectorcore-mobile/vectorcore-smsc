@@ -272,6 +272,26 @@ func tpStatusForDR(status string) byte {
 	}
 }
 
+// smppReceiptRequested applies the SMSC delivery receipt bits of SMPP
+// registered_delivery (SMPP v3.4 §5.2.17): 00 no receipt, 01 receipt on
+// success or failure, 10 receipt on failure only. 11 is reserved and treated
+// as 01.
+func smppReceiptRequested(m store.Message, status string) bool {
+	if m.SMPPRegisteredDelivery == nil {
+		// Row stored before registered_delivery was recorded: DRRequired
+		// means mode 01; otherwise send failure receipts only.
+		return status != StatusDelivered || m.DRRequired
+	}
+	switch byte(*m.SMPPRegisteredDelivery) & (smpp.RegDeliverySuccess | smpp.RegDeliveryFailure) {
+	case 0:
+		return false
+	case smpp.RegDeliveryFailure:
+		return status != StatusDelivered
+	default:
+		return true
+	}
+}
+
 // reportSMPP sends an SMPP deliver_sm delivery receipt back to the originating ESME.
 func (c *Correlator) reportSMPP(ctx context.Context, m store.Message, status string) {
 	if c.smppMgr == nil && c.smppReg == nil {
@@ -280,11 +300,12 @@ func (c *Correlator) reportSMPP(ctx context.Context, m store.Message, status str
 	if m.OriginPeer == "" {
 		return
 	}
-	// DRRequired is set for registered_delivery mode 01 (receipt on success
-	// and failure). Without it no success receipt is sent. Failure receipts
-	// are still sent, because mode 10 (failure only) is not recorded separately.
-	if status == StatusDelivered && !m.DRRequired {
-		slog.Debug("correlator: SMPP success receipt not requested", "peer", m.OriginPeer, "id", m.ID)
+	if !smppReceiptRequested(m, status) {
+		slog.Debug("correlator: SMPP receipt not requested",
+			"peer", m.OriginPeer,
+			"id", m.ID,
+			"status", status,
+		)
 		return
 	}
 

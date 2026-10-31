@@ -961,6 +961,7 @@ func (f *Forwarder) persistMessage(ctx context.Context, msg *codec.Message,
 		Kind:               store.NormalizeMessageKind(string(msg.Kind)),
 		RefMessageID:       msg.RefMessageID,
 	}
+	sm.SMPPRegisteredDelivery = smppRegisteredDeliveryForStore(msg)
 	if len(msg.RawTPDU) > 0 {
 		sm.RawTPDU = append([]byte(nil), msg.RawTPDU...)
 	}
@@ -983,6 +984,16 @@ func (f *Forwarder) persistMessage(ctx context.Context, msg *codec.Message,
 	if err := f.st.SaveMessage(ctx, sm); err != nil {
 		slog.Error("forwarder: persist message failed", "id", msg.ID, "err", err)
 	}
+}
+
+// smppRegisteredDeliveryForStore returns the SMPP registered_delivery field
+// to persist, or nil for messages that did not arrive over SMPP.
+func smppRegisteredDeliveryForStore(msg *codec.Message) *int {
+	if msg.SMPPRegisteredDelivery == nil {
+		return nil
+	}
+	v := int(*msg.SMPPRegisteredDelivery)
+	return &v
 }
 
 // tpmrForStore returns the TP-MR to persist, or nil when the ingress interface

@@ -147,7 +147,8 @@ CREATE TABLE IF NOT EXISTS messages (
     delivered_at     TEXT,
     kind             TEXT NOT NULL DEFAULT 'sm',
     ref_message_id   TEXT,
-    raw_tpdu         BLOB
+    raw_tpdu         BLOB,
+    smpp_registered_delivery INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS message_segments (

@@ -101,6 +101,8 @@ func DecodeSM(pdu *smpp.PDU) (*codec.Message, error) {
 
 	// Delivery report requested
 	msg.TPSRRequired = pdu.RegisteredDelivery&smpp.RegDeliverySuccess != 0
+	rd := pdu.RegisteredDelivery
+	msg.SMPPRegisteredDelivery = &rd
 
 	// Validity period
 	if vp := parseVP(pdu.ValidityPeriod); vp != nil {

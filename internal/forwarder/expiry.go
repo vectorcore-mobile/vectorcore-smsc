@@ -17,8 +17,8 @@ type ExpirySweeper struct {
 }
 
 // NewExpirySweeper creates an ExpirySweeper.
-// onExpiry is called for each expired message that had dr_required=true;
-// it is responsible for generating the failure delivery report.
+// onExpiry is called for each expired message; it records the outcome and
+// sends whatever delivery report the message's origin asked for.
 func NewExpirySweeper(f *Forwarder, interval time.Duration, onExpiry func(context.Context, store.Message)) *ExpirySweeper {
 	return &ExpirySweeper{f: f, interval: interval, onExpiry: onExpiry}
 }
@@ -55,7 +55,7 @@ func (e *ExpirySweeper) sweep(ctx context.Context) {
 			continue
 		}
 		// SFExpired is a gauge polled from DB; no per-event increment needed.
-		if m.DRRequired && e.onExpiry != nil {
+		if e.onExpiry != nil {
 			e.onExpiry(ctx, m)
 		}
 	}

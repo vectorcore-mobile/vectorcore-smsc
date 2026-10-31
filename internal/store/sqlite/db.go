@@ -78,6 +78,7 @@ func Open(ctx context.Context, dsn string, pollInterval time.Duration) (*DB, err
 	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'sm'`)
 	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN ref_message_id TEXT`)
 	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN raw_tpdu BLOB`)
+	sqlDB.ExecContext(ctx, `ALTER TABLE messages ADD COLUMN smpp_registered_delivery INTEGER`)
 	sqlDB.ExecContext(ctx, `UPDATE smpp_server_accounts
 		SET default_route_id = NULL
 		WHERE default_route_id IN (SELECT id FROM routing_rules WHERE egress_iface = 'sgd')`)

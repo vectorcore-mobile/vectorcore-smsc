@@ -83,6 +83,43 @@ func TestSaveMessageRoundTripsKindRefAndRawTPDU(t *testing.T) {
 	}
 }
 
+func TestSaveMessageRoundTripsSMPPRegisteredDelivery(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, filepath.Join(t.TempDir(), "smsc.db"), time.Hour)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer db.Close()
+
+	failureOnly := 0x02
+	if err := db.SaveMessage(ctx, store.Message{
+		ID: "smpp-1", OriginIface: "smpp", DstMSISDN: "15551230002", Status: store.MessageStatusDispatched,
+		SubmittedAt: time.Now(), SMPPRegisteredDelivery: &failureOnly,
+	}); err != nil {
+		t.Fatalf("SaveMessage(smpp-1) error = %v", err)
+	}
+	if err := db.SaveMessage(ctx, store.Message{
+		ID: "sgd-1", OriginIface: "sgd", DstMSISDN: "15551230002", Status: store.MessageStatusDispatched, SubmittedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("SaveMessage(sgd-1) error = %v", err)
+	}
+
+	got, err := db.GetMessage(ctx, "smpp-1")
+	if err != nil || got == nil {
+		t.Fatalf("GetMessage(smpp-1) = %v, %v", got, err)
+	}
+	if got.SMPPRegisteredDelivery == nil || *got.SMPPRegisteredDelivery != failureOnly {
+		t.Fatalf("smpp-1 SMPPRegisteredDelivery = %v, want 2", got.SMPPRegisteredDelivery)
+	}
+	got, err = db.GetMessage(ctx, "sgd-1")
+	if err != nil || got == nil {
+		t.Fatalf("GetMessage(sgd-1) = %v, %v", got, err)
+	}
+	if got.SMPPRegisteredDelivery != nil {
+		t.Fatalf("sgd-1 SMPPRegisteredDelivery = %d, want nil", *got.SMPPRegisteredDelivery)
+	}
+}
+
 // An existing database created before the kind/ref_message_id/raw_tpdu
 // columns must be upgraded in place by Open, with old rows read as "sm".
 func TestOpenUpgradesLegacyMessagesTable(t *testing.T) {
@@ -93,7 +130,7 @@ func TestOpenUpgradesLegacyMessagesTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	for _, col := range []string{"kind", "ref_message_id", "raw_tpdu"} {
+	for _, col := range []string{"kind", "ref_message_id", "raw_tpdu", "smpp_registered_delivery"} {
 		if _, err := db.db.ExecContext(ctx, "ALTER TABLE messages DROP COLUMN "+col); err != nil {
 			t.Fatalf("drop column %s: %v", col, err)
 		}
@@ -121,6 +158,9 @@ func TestOpenUpgradesLegacyMessagesTable(t *testing.T) {
 	}
 	if got.Kind != store.MessageKindSM {
 		t.Fatalf("legacy Kind = %q, want %q", got.Kind, store.MessageKindSM)
+	}
+	if got.SMPPRegisteredDelivery != nil {
+		t.Fatalf("legacy SMPPRegisteredDelivery = %d, want nil", *got.SMPPRegisteredDelivery)
 	}
 }
 

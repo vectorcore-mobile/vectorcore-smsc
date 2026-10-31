@@ -90,6 +90,10 @@ type Message struct {
 	TPSRRequired   bool           // TP-SRR — delivery report requested
 	ValidityPeriod *time.Duration // TP-VP decoded value (nil = no VP)
 
+	// SMPPRegisteredDelivery is the raw SMPP registered_delivery field of a
+	// submit_sm/deliver_sm (nil for other ingress interfaces).
+	SMPPRegisteredDelivery *byte
+
 	// SMS-STATUS-REPORT fields (populated only when decoding a status report)
 	TPStatus      byte      // TP-ST — delivery status of the referenced SM
 	DischargeTime time.Time // TP-DT — time the referenced SM was delivered/discarded

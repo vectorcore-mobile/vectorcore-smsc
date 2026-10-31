@@ -51,3 +51,33 @@ func TestDecodeSMDecodesBinaryPayloadWithUDH(t *testing.T) {
 		t.Fatalf("unexpected binary payload: %x", msg.Binary)
 	}
 }
+
+func TestDecodeSMRecordsRegisteredDelivery(t *testing.T) {
+	cases := []struct {
+		regDeliv byte
+		wantSRR  bool
+	}{
+		{0x00, false},
+		{0x01, true},
+		{0x02, false},
+		{0x11, true},
+	}
+	for _, tc := range cases {
+		msg, err := DecodeSM(&smpp.PDU{
+			CommandID:          smpp.CmdSubmitSM,
+			RegisteredDelivery: tc.regDeliv,
+			ShortMessage:       []byte("hi"),
+			SourceAddr:         "15551230001",
+			DestinationAddr:    "15551230002",
+		})
+		if err != nil {
+			t.Fatalf("DecodeSM(0x%02X) error = %v", tc.regDeliv, err)
+		}
+		if msg.SMPPRegisteredDelivery == nil || *msg.SMPPRegisteredDelivery != tc.regDeliv {
+			t.Fatalf("registered_delivery 0x%02X: SMPPRegisteredDelivery = %v", tc.regDeliv, msg.SMPPRegisteredDelivery)
+		}
+		if msg.TPSRRequired != tc.wantSRR {
+			t.Fatalf("registered_delivery 0x%02X: TPSRRequired = %v, want %v", tc.regDeliv, msg.TPSRRequired, tc.wantSRR)
+		}
+	}
+}

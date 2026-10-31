@@ -76,19 +76,32 @@ func TestReportSMPPServerLinkDoesNotWaitForResponse(t *testing.T) {
 }
 
 func TestReportSMPPSendsReceiptsOnlyWhenRequested(t *testing.T) {
+	mode := func(v int) *int { return &v }
 	cases := []struct {
 		name       string
+		regDeliv   *int // nil: row stored before registered_delivery was recorded
 		drRequired bool
 		status     string
 		wantPDU    bool
 	}{
-		{"success receipt requested", true, StatusDelivered, true},
-		{"success receipt not requested", false, StatusDelivered, false},
-		{"failure receipt requested", true, StatusFailed, true},
-		// registered_delivery=10 (failure only) is stored as DRRequired=false,
-		// so failure receipts must still go out.
-		{"failure receipt with DRRequired=false", false, StatusFailed, true},
-		{"expiry receipt with DRRequired=false", false, StatusExpired, true},
+		{"mode 00 delivered", mode(0x00), false, StatusDelivered, false},
+		{"mode 00 failed", mode(0x00), false, StatusFailed, false},
+		{"mode 00 expired", mode(0x00), false, StatusExpired, false},
+		{"mode 01 delivered", mode(0x01), true, StatusDelivered, true},
+		{"mode 01 failed", mode(0x01), true, StatusFailed, true},
+		{"mode 01 expired", mode(0x01), true, StatusExpired, true},
+		{"mode 10 delivered", mode(0x02), false, StatusDelivered, false},
+		{"mode 10 failed", mode(0x02), false, StatusFailed, true},
+		{"mode 10 expired", mode(0x02), false, StatusExpired, true},
+		{"mode 11 (reserved) delivered", mode(0x03), true, StatusDelivered, true},
+		// Only the low two bits select the SMSC receipt.
+		{"mode 00 with SME ack bits", mode(0x0C), false, StatusFailed, false},
+		{"mode 10 with intermediate bit", mode(0x12), false, StatusFailed, true},
+		// Legacy rows keep the previous behaviour.
+		{"legacy success requested", nil, true, StatusDelivered, true},
+		{"legacy success not requested", nil, false, StatusDelivered, false},
+		{"legacy failure", nil, false, StatusFailed, true},
+		{"legacy expiry", nil, false, StatusExpired, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -105,6 +118,8 @@ func TestReportSMPPSendsReceiptsOnlyWhenRequested(t *testing.T) {
 				SrcMSISDN:   "15551230001",
 				DstMSISDN:   "15551230002",
 				DRRequired:  tc.drRequired,
+
+				SMPPRegisteredDelivery: tc.regDeliv,
 			}, tc.status)
 
 			select {

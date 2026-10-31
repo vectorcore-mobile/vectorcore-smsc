@@ -192,6 +192,10 @@ type Message struct {
 	Kind                  string     `json:"kind"`                     // MessageKind*; "" is read as MessageKindSM
 	RefMessageID          string     `json:"ref_message_id,omitempty"` // status_report: the SM being reported on
 	RawTPDU               []byte     `json:"raw_tpdu,omitempty"`       // pre-encoded TP-DATA sent verbatim on egress
+	// SMPPRegisteredDelivery is the SMPP registered_delivery field of an
+	// SMPP-originated message; nil for other origins and for rows stored
+	// before it was recorded.
+	SMPPRegisteredDelivery *int `json:"smpp_registered_delivery,omitempty"`
 }
 
 // MessageFilter narrows list queries for operational views.

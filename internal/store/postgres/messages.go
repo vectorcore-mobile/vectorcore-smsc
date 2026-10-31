@@ -17,10 +17,10 @@ func (db *DB) SaveMessage(ctx context.Context, msg store.Message) error {
 				alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 				payload, udh, encoding, dcs, status, retry_count,
 				next_retry_at, dr_required, submitted_at, expiry_at,
-				kind, ref_message_id, raw_tpdu
+				kind, ref_message_id, raw_tpdu, smpp_registered_delivery
 			) VALUES (
 				$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,
-				$25,$26,$27
+				$25,$26,$27,$28
 			)`
 	_, err := db.pool.Exec(ctx, q,
 		msg.ID, msg.TPMR, msg.SMPPMsgID, msg.OriginIface, msg.OriginPeer,
@@ -32,6 +32,7 @@ func (db *DB) SaveMessage(ctx context.Context, msg store.Message) error {
 		store.NormalizeMessageKind(msg.Kind),
 		nullableUUID(msg.RefMessageID),
 		msg.RawTPDU,
+		msg.SMPPRegisteredDelivery,
 	)
 	if err != nil {
 		return fmt.Errorf("save message %s: %w", msg.ID, err)
@@ -151,7 +152,7 @@ func (db *DB) ListRetryableMessages(ctx context.Context) ([]store.Message, error
 			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
 			       dr_required, submitted_at, expiry_at,
-			       kind, ref_message_id::text, raw_tpdu, delivered_at
+			       kind, ref_message_id::text, raw_tpdu, delivered_at, smpp_registered_delivery
 		FROM messages
 		WHERE status IN ('QUEUED','WAIT_TIMER','WAIT_TIMER_EVENT')
 		  AND (next_retry_at IS NULL OR next_retry_at <= now())
@@ -167,7 +168,7 @@ func (db *DB) ListExpiredMessages(ctx context.Context) ([]store.Message, error) 
 			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
 			       dr_required, submitted_at, expiry_at,
-			       kind, ref_message_id::text, raw_tpdu, delivered_at
+			       kind, ref_message_id::text, raw_tpdu, delivered_at, smpp_registered_delivery
 		FROM messages
 		WHERE status IN ('QUEUED','WAIT_TIMER','WAIT_EVENT','WAIT_TIMER_EVENT')
 		  AND expiry_at IS NOT NULL AND expiry_at <= now()
@@ -182,7 +183,7 @@ func (db *DB) GetMessage(ctx context.Context, id string) (*store.Message, error)
 			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
 			       dr_required, submitted_at, expiry_at,
-			       kind, ref_message_id::text, raw_tpdu, delivered_at
+			       kind, ref_message_id::text, raw_tpdu, delivered_at, smpp_registered_delivery
 		FROM messages WHERE id = $1`
 	msgs, err := scanMessages(db, ctx, q, id)
 	if err != nil {
@@ -233,7 +234,7 @@ func scanMessages(db *DB, ctx context.Context, q string, args ...any) ([]store.M
 			&m.Payload, &m.UDH, &encoding, &dcs, &m.Status,
 			&m.RetryCount, &m.NextRetryAt,
 			&m.DRRequired, &m.SubmittedAt, &m.ExpiryAt,
-			&kind, &refMessageID, &m.RawTPDU, &m.DeliveredAt,
+			&kind, &refMessageID, &m.RawTPDU, &m.DeliveredAt, &m.SMPPRegisteredDelivery,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
@@ -315,7 +316,7 @@ func (db *DB) ListMessages(ctx context.Context, limit int) ([]store.Message, err
 			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
 			       dr_required, submitted_at, expiry_at,
-			       kind, ref_message_id::text, raw_tpdu, delivered_at
+			       kind, ref_message_id::text, raw_tpdu, delivered_at, smpp_registered_delivery
 	FROM messages ORDER BY submitted_at DESC LIMIT $1`
 	return scanMessages(db, ctx, q, limit)
 }
@@ -376,7 +377,7 @@ func (db *DB) ListFilteredMessages(ctx context.Context, filter store.MessageFilt
 			       alert_correlation_id, deferred_reason, deferred_interface, serving_node_at_deferral,
 			       payload, udh, encoding, dcs, status, retry_count, next_retry_at,
 			       dr_required, submitted_at, expiry_at,
-			       kind, ref_message_id::text, raw_tpdu, delivered_at
+			       kind, ref_message_id::text, raw_tpdu, delivered_at, smpp_registered_delivery
 		FROM messages`
 	if len(conds) > 0 {
 		q += "\n\t\tWHERE " + strings.Join(conds, " AND ")

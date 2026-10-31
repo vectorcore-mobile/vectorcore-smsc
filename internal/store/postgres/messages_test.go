@@ -84,3 +84,43 @@ func TestSaveMessageRoundTripsStatusReportFields(t *testing.T) {
 		t.Fatalf("report = kind %q ref %q raw % X", got.Kind, got.RefMessageID, got.RawTPDU)
 	}
 }
+
+func TestSaveMessageRoundTripsSMPPRegisteredDelivery(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+
+	smppID := "5d1f0f6e-3c1a-4b8e-9a51-7d2c9e0b6a11"
+	sgdID := "a3c2b1d0-8e7f-4a6b-9c5d-1e2f3a4b5c6d"
+	t.Cleanup(func() {
+		_ = db.DeleteMessage(ctx, smppID)
+		_ = db.DeleteMessage(ctx, sgdID)
+	})
+
+	failureOnly := 0x02
+	if err := db.SaveMessage(ctx, store.Message{
+		ID: smppID, OriginIface: "smpp", DstMSISDN: "15551230002", Status: store.MessageStatusDispatched,
+		SubmittedAt: time.Now(), SMPPRegisteredDelivery: &failureOnly,
+	}); err != nil {
+		t.Fatalf("SaveMessage(smpp) error = %v", err)
+	}
+	if err := db.SaveMessage(ctx, store.Message{
+		ID: sgdID, OriginIface: "sgd", DstMSISDN: "15551230002", Status: store.MessageStatusDispatched, SubmittedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("SaveMessage(sgd) error = %v", err)
+	}
+
+	got, err := db.GetMessage(ctx, smppID)
+	if err != nil || got == nil {
+		t.Fatalf("GetMessage(smpp) = %v, %v", got, err)
+	}
+	if got.SMPPRegisteredDelivery == nil || *got.SMPPRegisteredDelivery != failureOnly {
+		t.Fatalf("smpp SMPPRegisteredDelivery = %v, want 2", got.SMPPRegisteredDelivery)
+	}
+	got, err = db.GetMessage(ctx, sgdID)
+	if err != nil || got == nil {
+		t.Fatalf("GetMessage(sgd) = %v, %v", got, err)
+	}
+	if got.SMPPRegisteredDelivery != nil {
+		t.Fatalf("sgd SMPPRegisteredDelivery = %d, want nil", *got.SMPPRegisteredDelivery)
+	}
+}

@@ -143,7 +143,8 @@ CREATE TABLE IF NOT EXISTS messages (
     delivered_at     TIMESTAMPTZ,
     kind             TEXT NOT NULL DEFAULT 'sm',
     ref_message_id   UUID,
-    raw_tpdu         BYTEA
+    raw_tpdu         BYTEA,
+    smpp_registered_delivery SMALLINT
 );
 
 CREATE TABLE IF NOT EXISTS message_segments (
