@@ -116,14 +116,32 @@ func (c *Correlator) Report(ctx context.Context, m store.Message, status string)
 }
 
 func (c *Correlator) reportS6c(ctx context.Context, m store.Message, status string) {
-	if c.s6c == nil || c.scAddr == "" {
-		return
-	}
 	if m.EgressIface != "sgd" {
 		return
 	}
+	c.sendRSDS(ctx, m, s6cCauseForStatus(status), status)
+}
 
-	cause := s6cCauseForStatus(status)
+// ReportDeferred sends RSDS when an SGd MT attempt is deferred because the
+// subscriber can't take the message now: cause is absent-user or
+// memory-capacity-exceeded. The HSS then stores Message Waiting Data (MNRF or
+// MCEF) and alerts the SMSC (ALR) when the subscriber is reachable again or
+// has memory available (TS 23.040 §10.1, TS 29.338 §5.3.2.4). The forwarder
+// calls this once per episode, not on every retry.
+func (c *Correlator) ReportDeferred(ctx context.Context, m store.Message, cause uint32) {
+	status := "deferred_absent"
+	if cause == dcodec.SMDeliveryCauseMemoryCapacityExceeded {
+		status = "deferred_memory_full"
+	}
+	c.sendRSDS(ctx, m, cause, status)
+}
+
+// sendRSDS reports an MT outcome for m's destination to the HSS over S6c.
+func (c *Correlator) sendRSDS(ctx context.Context, m store.Message, cause uint32, status string) {
+	if c.s6c == nil || c.scAddr == "" {
+		return
+	}
+
 	sub, err := c.st.GetSubscriber(ctx, m.DstMSISDN)
 	if err != nil {
 		slog.Warn("correlator: S6c subscriber lookup failed", "id", m.ID, "dst", m.DstMSISDN, "err", err)

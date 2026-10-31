@@ -126,17 +126,15 @@ func (c *Client) LookupRouting(msisdn string) (*RoutingInfo, error) {
 
 	select {
 	case ans := <-replyCh:
-		if rc := ans.FindAVP(dcodec.CodeResultCode, 0); rc != nil {
-			if resultCode, err := rc.Uint32(); err == nil {
-				slog.Debug("s6c SRI-SM answer received",
-					"peer", c.peer.Name(),
-					"msisdn", msisdn,
-					"session_id", sessionID,
-					"hop_by_hop", hopByHop,
-					"result_code", resultCode,
-				)
-			}
-		}
+		resultCode, experimental := parseResult(ans)
+		slog.Debug("s6c SRI-SM answer received",
+			"peer", c.peer.Name(),
+			"msisdn", msisdn,
+			"session_id", sessionID,
+			"hop_by_hop", hopByHop,
+			"result_code", resultCode,
+			"experimental", experimental,
+		)
 		return parseSRIAnswer(ans)
 	case <-time.After(requestTimeout):
 		return nil, fmt.Errorf("s6c: SRI-SM timeout after %s", requestTimeout)
@@ -154,21 +152,9 @@ func (c *Client) ReportDelivery(msisdn, imsi, scAddr, alertCorrelationID string,
 	hopByHop := dcodec.NextHopByHop()
 	sessionID := dcodec.NewSessionID(cfg.LocalFQDN)
 
-	nodeOutcomeChildren := []*dcodec.AVP{
-		dcodec.NewUint32(dcodec.CodeSMDeliveryCause, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, cause),
-	}
-	if diagnostic != nil {
-		nodeOutcomeChildren = append(nodeOutcomeChildren,
-			dcodec.NewUint32(dcodec.CodeAbsentUserDiagnosticSM, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, *diagnostic),
-		)
-	}
-	nodeOutcome, err := dcodec.NewGrouped(dcodec.CodeIPSMGWDeliveryOutcome, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, nodeOutcomeChildren)
+	deliveryOutcome, err := buildSMDeliveryOutcome(cause, diagnostic)
 	if err != nil {
-		return nil, fmt.Errorf("s6c: build IP-SM-GW-Delivery-Outcome: %w", err)
-	}
-	deliveryOutcome, err := dcodec.NewGrouped(dcodec.CodeSMDeliveryOutcomeS6c, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, []*dcodec.AVP{nodeOutcome})
-	if err != nil {
-		return nil, fmt.Errorf("s6c: build SM-Delivery-Outcome: %w", err)
+		return nil, err
 	}
 
 	b := dcodec.NewRequest(dcodec.CmdReportSMDeliveryStatus, dcodec.App3GPP_S6c)
@@ -215,22 +201,43 @@ func (c *Client) ReportDelivery(msisdn, imsi, scAddr, alertCorrelationID string,
 
 	select {
 	case ans := <-replyCh:
-		if rc := ans.FindAVP(dcodec.CodeResultCode, 0); rc != nil {
-			if resultCode, err := rc.Uint32(); err == nil {
-				slog.Debug("s6c RSDS answer received",
-					"peer", c.peer.Name(),
-					"msisdn", msisdn,
-					"imsi", imsi,
-					"session_id", sessionID,
-					"hop_by_hop", hopByHop,
-					"result_code", resultCode,
-				)
-			}
-		}
+		resultCode, experimental := parseResult(ans)
+		slog.Debug("s6c RSDS answer received",
+			"peer", c.peer.Name(),
+			"msisdn", msisdn,
+			"imsi", imsi,
+			"session_id", sessionID,
+			"hop_by_hop", hopByHop,
+			"result_code", resultCode,
+			"experimental", experimental,
+		)
 		return parseRSDSAnswer(ans)
 	case <-time.After(requestTimeout):
 		return nil, fmt.Errorf("s6c: RSDS timeout after %s", requestTimeout)
 	}
+}
+
+// buildSMDeliveryOutcome builds SM-Delivery-Outcome for RSDS. The SMSC
+// reports RSDS only for MT attempts via SGd, i.e. via the MME, so the cause
+// goes in MME-Delivery-Outcome (TS 29.338 §7.3.17).
+func buildSMDeliveryOutcome(cause uint32, diagnostic *uint32) (*dcodec.AVP, error) {
+	children := []*dcodec.AVP{
+		dcodec.NewUint32(dcodec.CodeSMDeliveryCause, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, cause),
+	}
+	if diagnostic != nil {
+		children = append(children,
+			dcodec.NewUint32(dcodec.CodeAbsentUserDiagnosticSM, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, *diagnostic),
+		)
+	}
+	nodeOutcome, err := dcodec.NewGrouped(dcodec.CodeMMEDeliveryOutcome, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, children)
+	if err != nil {
+		return nil, fmt.Errorf("s6c: build MME-Delivery-Outcome: %w", err)
+	}
+	outcome, err := dcodec.NewGrouped(dcodec.CodeSMDeliveryOutcomeS6c, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, []*dcodec.AVP{nodeOutcome})
+	if err != nil {
+		return nil, fmt.Errorf("s6c: build SM-Delivery-Outcome: %w", err)
+	}
+	return outcome, nil
 }
 
 func (c *Client) dispatch(p *diameter.Peer, msg *dcodec.Message) {

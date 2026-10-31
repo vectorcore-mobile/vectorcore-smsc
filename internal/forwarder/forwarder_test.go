@@ -3,6 +3,9 @@ package forwarder
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1379,5 +1382,223 @@ func TestDispatchDoesNotRenormalizeStatusReportDestination(t *testing.T) {
 	}
 	if st.saved.TPMR != nil {
 		t.Fatalf("TPMR = %d, want nil for an internal message", *st.saved.TPMR)
+	}
+}
+
+// An HSS failure on SRI-SM (anything but user-unknown) must not fall back to a
+// stale cached serving MME; the SGd candidate is unavailable until S6c works.
+func TestSelectRouteDoesNotUseStaleMMEWhenS6cFails(t *testing.T) {
+	st := &forwarderTestStore{
+		subscriber: &store.Subscriber{
+			MSISDN:      "989100000111",
+			IMSI:        "432600000000111",
+			LTEAttached: true,
+			MMEHost:     "stale-mme.epc.example.net",
+			MMENumber:   "15550000002",
+			UpdatedAt:   time.Now().Add(-time.Hour), // older than the S6c cache TTL
+		},
+	}
+	reg := newTestRegistry(t, st)
+	reg.SetS6cClient(&fakeS6cClient{err: &s6c.ErrResult{Command: "SRI-SM", ResultCode: dcodec.DiameterUnableToComply}})
+	sgd := &fakeSGdSender{}
+	f := New(Config{Registry: reg, Engine: routing.NewEngine(), Store: st, SGdSender: sgd})
+
+	route, err := f.selectRoute(context.Background(), &codec.Message{
+		Destination: codec.Address{MSISDN: "989100000111"},
+	}, 2) // sgd-built-in
+	if err == nil {
+		t.Fatalf("selectRoute() = %+v, want S6c lookup failure", route)
+	}
+	if !strings.Contains(err.Error(), "S6c lookup failed") {
+		t.Fatalf("selectRoute() error = %v, want S6c lookup failure", err)
+	}
+}
+
+func TestClassifySGdResult(t *testing.T) {
+	cause := func(v uint32) *uint32 { return &v }
+	cases := []struct {
+		name string
+		err  *diametersgd.OFAResultError
+		want routeOutcome
+	}{
+		{"base 3002 absent", &diametersgd.OFAResultError{ResultCode: dcodec.DiameterUnableToDeliver}, routeOutcomeWaitEvent},
+		{"base 3004 busy", &diametersgd.OFAResultError{ResultCode: dcodec.DiameterTooBusy}, routeOutcomeBusy},
+		{"base 5012", &diametersgd.OFAResultError{ResultCode: dcodec.DiameterUnableToComply}, routeOutcomeWaitTimer},
+		{"5550 absent", &diametersgd.OFAResultError{ResultCode: diametersgd.ResultErrorAbsentUser, Experimental: true}, routeOutcomeWaitEvent},
+		{"5551 busy", &diametersgd.OFAResultError{ResultCode: diametersgd.ResultErrorUserBusyForMTSMS, Experimental: true}, routeOutcomeBusy},
+		{"5552 facility", &diametersgd.OFAResultError{ResultCode: diametersgd.ResultErrorFacilityNotSupported, Experimental: true}, routeOutcomeWaitTimer},
+		{"5553 illegal user", &diametersgd.OFAResultError{ResultCode: diametersgd.ResultErrorIllegalUser, Experimental: true}, routeOutcomeRejected},
+		{"5554 illegal equipment", &diametersgd.OFAResultError{ResultCode: diametersgd.ResultErrorIllegalEquipment, Experimental: true}, routeOutcomeRejected},
+		{"5555 no cause", &diametersgd.OFAResultError{ResultCode: diametersgd.ResultErrorSMDeliveryFailure, Experimental: true}, routeOutcomeWaitTimer},
+		{"5555 memory full", &diametersgd.OFAResultError{ResultCode: diametersgd.ResultErrorSMDeliveryFailure, Experimental: true, DeliveryFailureCause: cause(diametersgd.DeliveryFailureMemoryCapacityExceeded)}, routeOutcomeWaitEvent},
+		{"5555 congestion", &diametersgd.OFAResultError{ResultCode: diametersgd.ResultErrorSMDeliveryFailure, Experimental: true, DeliveryFailureCause: cause(diametersgd.DeliveryFailureSCCongestion)}, routeOutcomeWaitTimer},
+		{"5555 protocol error", &diametersgd.OFAResultError{ResultCode: diametersgd.ResultErrorSMDeliveryFailure, Experimental: true, DeliveryFailureCause: cause(diametersgd.DeliveryFailureEquipmentProtocolError)}, routeOutcomeRejected},
+		{"5555 not SM equipped", &diametersgd.OFAResultError{ResultCode: diametersgd.ResultErrorSMDeliveryFailure, Experimental: true, DeliveryFailureCause: cause(diametersgd.DeliveryFailureEquipmentNotSMEquipped)}, routeOutcomeRejected},
+		{"5555 unknown cause value", &diametersgd.OFAResultError{ResultCode: diametersgd.ResultErrorSMDeliveryFailure, Experimental: true, DeliveryFailureCause: cause(99)}, routeOutcomeWaitTimer},
+		// Base 5550 is not the 3GPP absent-user code.
+		{"base 5550", &diametersgd.OFAResultError{ResultCode: diametersgd.ResultErrorAbsentUser}, routeOutcomeWaitTimer},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifySGdResult(tc.err); got != tc.want {
+				t.Fatalf("classifySGdResult() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+type captureReporter struct {
+	mu       sync.Mutex
+	reports  []string
+	deferred []uint32
+}
+
+func (r *captureReporter) Report(_ context.Context, _ store.Message, status string) {
+	r.mu.Lock()
+	r.reports = append(r.reports, status)
+	r.mu.Unlock()
+}
+
+func (r *captureReporter) ReportDeferred(_ context.Context, _ store.Message, cause uint32) {
+	r.mu.Lock()
+	r.deferred = append(r.deferred, cause)
+	r.mu.Unlock()
+}
+
+func dispatchWithSGdError(t *testing.T, sgdErr error) (*forwarderTestStore, *captureReporter) {
+	t.Helper()
+	st := &forwarderTestStore{}
+	reg := newTestRegistry(t, st)
+	reg.SetS6cClient(&fakeS6cClient{info: &s6c.RoutingInfo{
+		IMSI: "432600000000111", Attached: true, MMEName: "mme-b.epc.example.net", MMENumber: "15550000002",
+	}})
+	rep := &captureReporter{}
+	f := New(Config{
+		Registry:         reg,
+		Engine:           routing.NewEngine(),
+		Store:            st,
+		SGdSender:        &fakeSGdSender{err: sgdErr},
+		Reporter:         rep,
+		MaxQueueLifetime: time.Hour,
+	})
+	f.Dispatch(context.Background(), &codec.Message{
+		ID:               "m1",
+		IngressInterface: codec.InterfaceSGd,
+		Source:           codec.Address{MSISDN: "989100000555"},
+		Destination:      codec.Address{MSISDN: "989100000111", TON: 0x01},
+	})
+	return st, rep
+}
+
+func TestDispatchSGdBusyRetriesSoonWithoutUsingBudget(t *testing.T) {
+	before := time.Now()
+	st, rep := dispatchWithSGdError(t, &diametersgd.OFAResultError{ResultCode: diametersgd.ResultErrorUserBusyForMTSMS, Experimental: true})
+
+	if st.nextRetryAt == nil {
+		t.Fatal("busy answer scheduled no retry")
+	}
+	if d := st.nextRetryAt.Sub(before); d < sgdBusyRetryDelay-time.Second || d > sgdBusyRetryDelay+time.Second {
+		t.Fatalf("next retry in %v, want about %v", d, sgdBusyRetryDelay)
+	}
+	if st.retryCount != 0 {
+		t.Fatalf("retryCount = %d, want 0 (busy doesn't consume the retry budget)", st.retryCount)
+	}
+	if len(rep.reports) != 0 || len(rep.deferred) != 0 {
+		t.Fatalf("reports = %v, deferred = %v; want none for busy", rep.reports, rep.deferred)
+	}
+}
+
+func TestDispatchSGdRejectionFailsImmediately(t *testing.T) {
+	cause := diametersgd.DeliveryFailureEquipmentProtocolError
+	st, rep := dispatchWithSGdError(t, &diametersgd.OFAResultError{
+		ResultCode: diametersgd.ResultErrorSMDeliveryFailure, Experimental: true, DeliveryFailureCause: &cause,
+	})
+
+	// The IMS candidates before SGd were unavailable (would normally mean
+	// "retry later"), but a handset rejection is final.
+	if got := st.statusUpdates[len(st.statusUpdates)-1]; got != store.MessageStatusFailed {
+		t.Fatalf("final status = %s, want FAILED", got)
+	}
+	if st.nextRetryAt != nil {
+		t.Fatalf("rejected message scheduled a retry at %v", st.nextRetryAt)
+	}
+	if fmt.Sprint(rep.reports) != "[FAILED]" {
+		t.Fatalf("reports = %v, want [FAILED]", rep.reports)
+	}
+}
+
+func TestDispatchSGdMemoryFullReportsMCEF(t *testing.T) {
+	cause := diametersgd.DeliveryFailureMemoryCapacityExceeded
+	st, rep := dispatchWithSGdError(t, &diametersgd.OFAResultError{
+		ResultCode: diametersgd.ResultErrorSMDeliveryFailure, Experimental: true, DeliveryFailureCause: &cause,
+	})
+
+	if got := st.statusUpdates[len(st.statusUpdates)-1]; got != store.MessageStatusWaitTimerEvent {
+		t.Fatalf("final status = %s, want WAIT_TIMER_EVENT", got)
+	}
+	if fmt.Sprint(rep.deferred) != fmt.Sprint([]uint32{dcodec.SMDeliveryCauseMemoryCapacityExceeded}) {
+		t.Fatalf("deferred RSDS causes = %v, want [memory capacity exceeded]", rep.deferred)
+	}
+}
+
+type concurrencySGdSender struct {
+	mu        sync.Mutex
+	active    map[string]int
+	maxActive map[string]int
+	total     int
+	maxTotal  int
+}
+
+func (s *concurrencySGdSender) SendOFR(_ context.Context, msg *codec.Message, _, _ string) error {
+	key := msg.Destination.IMSI
+	s.mu.Lock()
+	if s.active == nil {
+		s.active, s.maxActive = map[string]int{}, map[string]int{}
+	}
+	s.active[key]++
+	s.total++
+	if s.active[key] > s.maxActive[key] {
+		s.maxActive[key] = s.active[key]
+	}
+	if s.total > s.maxTotal {
+		s.maxTotal = s.total
+	}
+	s.mu.Unlock()
+
+	time.Sleep(30 * time.Millisecond)
+
+	s.mu.Lock()
+	s.active[key]--
+	s.total--
+	s.mu.Unlock()
+	return nil
+}
+
+func TestDeliverSGdSerialisesPerDestination(t *testing.T) {
+	sender := &concurrencySGdSender{}
+	f := New(Config{SGdSender: sender})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		for _, imsi := range []string{"432600000000111", "432600000000555"} {
+			wg.Add(1)
+			go func(imsi string) {
+				defer wg.Done()
+				msg := &codec.Message{Destination: codec.Address{IMSI: imsi}}
+				if err := f.deliverSGd(context.Background(), msg, "mme"); err != nil {
+					t.Errorf("deliverSGd() error = %v", err)
+				}
+			}(imsi)
+		}
+	}
+	wg.Wait()
+
+	for imsi, max := range sender.maxActive {
+		if max != 1 {
+			t.Errorf("max concurrent MT to %s = %d, want 1", imsi, max)
+		}
+	}
+	if sender.maxTotal < 2 {
+		t.Errorf("max concurrent MT overall = %d, want different destinations in parallel", sender.maxTotal)
 	}
 }

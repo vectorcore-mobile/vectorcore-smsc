@@ -109,6 +109,14 @@ type fakeMME struct {
 	resultCode uint32
 	tfrs       chan *dcodec.Message
 	moAnswers  chan *dcodec.Message
+
+	// Optional realism (see setRealistic / setExperimental).
+	experimental bool    // send resultCode as Experimental-Result (vendor 10415)
+	failureCause *uint32 // SM-Enumerated-Delivery-Failure-Cause to include
+	answerDelay  time.Duration
+	oneMTPerIMSI bool // like vectorcore-mme: a second concurrent TFR for an IMSI gets 3004
+	inFlight     map[string]bool
+	busyAnswers  int
 }
 
 func startFakeMME(ctx context.Context, t *testing.T, host string, port int) *fakeMME {
@@ -135,25 +143,37 @@ func startFakeMME(ctx context.Context, t *testing.T, host string, port int) *fak
 	m.peer.AddOnMessageHandler(func(p *diameter.Peer, msg *dcodec.Message) {
 		switch {
 		case msg.Header.CommandCode == dcodec.CmdMTForwardShortMessage && msg.IsRequest():
+			imsi := ""
+			if a := msg.FindAVP(dcodec.CodeUserName, 0); a != nil {
+				imsi = string(a.Data)
+			}
 			m.mu.Lock()
-			rc := m.resultCode
+			rc, experimental, failureCause, delay := m.resultCode, m.experimental, m.failureCause, m.answerDelay
+			busy := m.oneMTPerIMSI && m.inFlight[imsi]
+			if busy {
+				m.busyAnswers++
+			} else if m.oneMTPerIMSI {
+				m.inFlight[imsi] = true
+			}
 			m.mu.Unlock()
 			m.tfrs <- msg
+			if busy {
+				m.sendTFA(p, msg, dcodec.DiameterTooBusy, false, nil)
+				return
+			}
 			if rc == 0 {
 				return // silent MME: never answers
 			}
-			ans := dcodec.NewAnswer(msg)
-			if sid := msg.FindAVP(dcodec.CodeSessionID, 0); sid != nil {
-				ans.Add(dcodec.NewString(dcodec.CodeSessionID, 0, dcodec.FlagMandatory, string(sid.Data)))
+			answer := func() {
+				m.sendTFA(p, msg, rc, experimental, failureCause)
+				m.mu.Lock()
+				delete(m.inFlight, imsi)
+				m.mu.Unlock()
 			}
-			ans.Add(
-				dcodec.NewUint32(dcodec.CodeResultCode, 0, dcodec.FlagMandatory, rc),
-				dcodec.NewUint32(dcodec.CodeAuthSessionState, 0, dcodec.FlagMandatory, dcodec.AuthSessionStateNoStateMaintained),
-				dcodec.NewString(dcodec.CodeOriginHost, 0, dcodec.FlagMandatory, host),
-				dcodec.NewString(dcodec.CodeOriginRealm, 0, dcodec.FlagMandatory, mmeRealm),
-			)
-			if err := p.Send(ans.Build()); err != nil {
-				t.Errorf("%s: send TFA: %v", host, err)
+			if delay > 0 {
+				go func() { time.Sleep(delay); answer() }()
+			} else {
+				answer()
 			}
 		case msg.Header.CommandCode == dcodec.CmdMOForwardShortMessage && !msg.IsRequest():
 			m.moAnswers <- msg
@@ -162,6 +182,70 @@ func startFakeMME(ctx context.Context, t *testing.T, host string, port int) *fak
 	m.peer.Start(ctx)
 	t.Cleanup(m.peer.Stop)
 	return m
+}
+
+// sendTFA answers an MT-Forward request.
+func (m *fakeMME) sendTFA(p *diameter.Peer, req *dcodec.Message, rc uint32, experimental bool, failureCause *uint32) {
+	ans := dcodec.NewAnswer(req)
+	if sid := req.FindAVP(dcodec.CodeSessionID, 0); sid != nil {
+		ans.Add(dcodec.NewString(dcodec.CodeSessionID, 0, dcodec.FlagMandatory, string(sid.Data)))
+	}
+	if experimental {
+		exp, err := dcodec.NewGrouped(dcodec.CodeExperimentalResult, 0, dcodec.FlagMandatory, []*dcodec.AVP{
+			dcodec.NewUint32(dcodec.CodeVendorID, 0, dcodec.FlagMandatory, dcodec.Vendor3GPP),
+			dcodec.NewUint32(dcodec.CodeExperimentalResultCode, 0, dcodec.FlagMandatory, rc),
+		})
+		if err != nil {
+			m.t.Errorf("%s: build Experimental-Result: %v", m.host, err)
+			return
+		}
+		ans.Add(exp)
+	} else {
+		ans.Add(dcodec.NewUint32(dcodec.CodeResultCode, 0, dcodec.FlagMandatory, rc))
+	}
+	if failureCause != nil {
+		cause, err := dcodec.NewGrouped(dcodec.CodeSMDeliveryFailureCause, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, []*dcodec.AVP{
+			dcodec.NewUint32(dcodec.CodeSMEnumeratedDeliveryFailureCause, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, *failureCause),
+		})
+		if err != nil {
+			m.t.Errorf("%s: build SM-Delivery-Failure-Cause: %v", m.host, err)
+			return
+		}
+		ans.Add(cause)
+	}
+	ans.Add(
+		dcodec.NewUint32(dcodec.CodeAuthSessionState, 0, dcodec.FlagMandatory, dcodec.AuthSessionStateNoStateMaintained),
+		dcodec.NewString(dcodec.CodeOriginHost, 0, dcodec.FlagMandatory, m.host),
+		dcodec.NewString(dcodec.CodeOriginRealm, 0, dcodec.FlagMandatory, mmeRealm),
+	)
+	if err := p.Send(ans.Build()); err != nil {
+		m.t.Errorf("%s: send TFA: %v", m.host, err)
+	}
+}
+
+// setRealistic makes the MME behave like vectorcore-mme today: one MT
+// transaction per IMSI (a concurrent TFR gets 3004) and answers that take
+// delay, so transactions really overlap.
+func (m *fakeMME) setRealistic(delay time.Duration) {
+	m.mu.Lock()
+	m.oneMTPerIMSI = true
+	m.inFlight = map[string]bool{}
+	m.answerDelay = delay
+	m.mu.Unlock()
+}
+
+// setExperimental makes TFAs carry rc as a TS 29.338 Experimental-Result,
+// optionally with SM-Delivery-Failure-Cause.
+func (m *fakeMME) setExperimental(rc uint32, failureCause *uint32) {
+	m.mu.Lock()
+	m.resultCode, m.experimental, m.failureCause = rc, true, failureCause
+	m.mu.Unlock()
+}
+
+func (m *fakeMME) busyCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.busyAnswers
 }
 
 // setResultCode sets the TFA Result-Code; 0 means never answer.
@@ -267,6 +351,7 @@ type harnessOptions struct {
 	maxQueueLifetime time.Duration // default 1h
 	tfaTimeout       time.Duration // default sgd.DefaultTFATimeout
 	expirySweep      time.Duration // >0 runs the expiry sweeper at this interval
+	retryInterval    time.Duration // >0 runs the retry scheduler at this interval
 }
 
 func startHarness(t *testing.T) *harness {
@@ -317,6 +402,9 @@ func startHarnessWith(t *testing.T, opts harnessOptions) *harness {
 			correlator.Report(ctx, m, dr.StatusExpired)
 		})
 		go sweeper.Run(ctx)
+	}
+	if opts.retryInterval > 0 {
+		go forwarder.NewRetryScheduler(fwd, opts.retryInterval).Run(ctx)
 	}
 	srv.SetOnMessage(func(msg *codec.Message, _ string) { fwd.Dispatch(ctx, msg) })
 
@@ -660,6 +748,11 @@ func TestSGdStatusReportOnExpiry(t *testing.T) {
 	if sr.RefMessageID != orig.ID {
 		t.Fatalf("status report ref_message_id = %q, want %q", sr.RefMessageID, orig.ID)
 	}
+	// The HSS was told the destination was absent when delivery was deferred;
+	// expiry itself sends nothing further.
+	if causes := h.hss.rsdsCauses(destMSISDN); fmt.Sprint(causes) != fmt.Sprint([]uint32{dcodec.SMDeliveryCauseAbsentUser}) {
+		t.Fatalf("destination RSDS causes = %v, want exactly one absent-user", causes)
+	}
 }
 
 // A missing TFA is not a final outcome: the message waits for retry and no
@@ -682,4 +775,104 @@ func TestSGdTFATimeoutIsNotReportedAsFailure(t *testing.T) {
 	if n := len(h.messagesOfKind(t, store.MessageKindStatusReport)); n != 0 {
 		t.Fatalf("status report rows = %d, want 0", n)
 	}
+}
+
+// An absent destination is reported to the HSS (RSDS absent-user) once per
+// absent episode: on the first deferral, not on timer retries, and again
+// after an HSS alert finds the subscriber still absent. Delivery clears it.
+func TestSGdAbsentDestinationReportedToHSSOncePerEpisode(t *testing.T) {
+	ctx := context.Background()
+	h := startHarnessWith(t, harnessOptions{retryInterval: 50 * time.Millisecond})
+	h.mmeB.setResultCode(dcodec.DiameterUnableToDeliver)
+	absent, success := dcodec.SMDeliveryCauseAbsentUser, dcodec.SMDeliveryCauseSuccessfulTransfer
+	wantRSDS := func(want ...uint32) {
+		t.Helper()
+		waitFor(t, fmt.Sprintf("destination RSDS causes %v", want), func() bool {
+			return fmt.Sprint(h.hss.rsdsCauses(destMSISDN)) == fmt.Sprint(want)
+		})
+	}
+
+	h.mmeA.sendMO(t, submitTo(destMSISDN, 0x30, false))
+	h.mmeB.nextTFR(t)
+	orig := h.waitForStatus(t, store.MessageKindSM, store.MessageStatusWaitTimerEvent, 1)[0]
+	wantRSDS(absent) // 1. first deferral → HSS stores MWD
+
+	// 2. Timer retry, still absent: no repeat RSDS.
+	if err := h.st.UpdateMessageRetry(ctx, orig.ID, 1, time.Now().Add(-time.Second), orig.RouteCursor); err != nil {
+		t.Fatalf("UpdateMessageRetry() error = %v", err)
+	}
+	h.mmeB.nextTFR(t)
+	h.waitForStatus(t, store.MessageKindSM, store.MessageStatusWaitEvent, 1)
+	time.Sleep(200 * time.Millisecond)
+	wantRSDS(absent)
+
+	// 3. HSS alert arrives (the HSS clears its MWD), retry still absent: report again.
+	alertRetry := func() {
+		t.Helper()
+		ok, err := h.st.RequeueMessageForAlert(ctx, orig.ID, time.Now().Add(-time.Second), orig.RouteCursor, "sgd_alert_retry",
+			[]string{store.MessageStatusWaitEvent, store.MessageStatusWaitTimerEvent, store.MessageStatusWaitTimer})
+		if err != nil || !ok {
+			t.Fatalf("RequeueMessageForAlert() = %v, %v", ok, err)
+		}
+	}
+	alertRetry()
+	h.mmeB.nextTFR(t)
+	wantRSDS(absent, absent)
+
+	// 4. Subscriber reachable, next alert delivers: HSS told successful transfer.
+	h.mmeB.setResultCode(dcodec.DiameterSuccess)
+	waitFor(t, "message waiting again after the failed alert retry", func() bool {
+		m, err := h.st.GetMessage(ctx, orig.ID)
+		return err == nil && m != nil && m.Status != store.MessageStatusDispatched
+	})
+	alertRetry()
+	h.mmeB.nextTFR(t)
+	h.waitForStatus(t, store.MessageKindSM, store.MessageStatusDelivered, 1)
+	wantRSDS(absent, absent, success)
+}
+
+// Against an MME that allows one MT per subscriber (like vectorcore-mme),
+// a concatenated SMS and its status reports must be delivered one at a time
+// per handset, never provoking a busy answer.
+func TestSGdConcatenatedSMSSerialisedPerSubscriber(t *testing.T) {
+	h := startHarness(t)
+	h.mmeA.setRealistic(150 * time.Millisecond)
+	h.mmeB.setRealistic(150 * time.Millisecond)
+
+	for i, mr := range []byte{0x40, 0x41, 0x42} {
+		part := submitTo(destMSISDN, mr, true)
+		part.Text = fmt.Sprintf("part %d", i+1)
+		part.Concat = &codec.ConcatInfo{Ref: 0x0B0C, Total: 3, Sequence: uint8(i + 1)}
+		h.mmeA.sendMO(t, part)
+	}
+
+	h.waitForStatus(t, store.MessageKindSM, store.MessageStatusDelivered, 3)
+	h.waitForStatus(t, store.MessageKindStatusReport, store.MessageStatusDelivered, 3)
+	if n := h.mmeB.busyCount(); n != 0 {
+		t.Fatalf("destination MME answered busy %d time(s); MTs to one subscriber were not serialised", n)
+	}
+	if n := h.mmeA.busyCount(); n != 0 {
+		t.Fatalf("sender MME answered busy %d time(s); status reports to one subscriber were not serialised", n)
+	}
+}
+
+// A handset that rejects the status report (TS 29.338 SM delivery failure,
+// equipment protocol error) is final: the report fails at once instead of
+// being retried until the queue lifetime runs out.
+func TestSGdStatusReportRejectedByHandsetFailsImmediately(t *testing.T) {
+	h := startHarness(t)
+	cause := sgdsrv.DeliveryFailureEquipmentProtocolError
+	h.mmeA.setExperimental(sgdsrv.ResultErrorSMDeliveryFailure, &cause)
+
+	h.mmeA.sendMO(t, submitTo(destMSISDN, 0x50, true))
+	h.mmeB.nextTFR(t)
+	h.mmeA.nextTFR(t)
+
+	h.waitForStatus(t, store.MessageKindSM, store.MessageStatusDelivered, 1)
+	sr := h.waitForStatus(t, store.MessageKindStatusReport, store.MessageStatusFailed, 1)[0]
+	if sr.NextRetryAt != nil {
+		t.Fatalf("rejected status report has a retry scheduled at %v", sr.NextRetryAt)
+	}
+	// No retry, and the failed report doesn't generate a report of its own.
+	h.mmeA.expectNoTFR(t, 300*time.Millisecond)
 }

@@ -11,18 +11,49 @@ import (
 	dcodec "github.com/svinson1121/vectorcore-smsc/internal/diameter/codec"
 )
 
+// diameterErrorUserUnknown is DIAMETER_ERROR_USER_UNKNOWN (TS 29.338), sent
+// in Experimental-Result with Vendor-Id 10415. As a base Result-Code, 5001 is
+// DIAMETER_AVP_UNSUPPORTED instead.
+const diameterErrorUserUnknown uint32 = 5001
+
+// ErrUnknownUser means the HSS does not know the subscriber.
 type ErrUnknownUser struct {
 	ResultCode uint32
 }
 
 func (e *ErrUnknownUser) Error() string {
-	return fmt.Sprintf("s6c: HSS returned result-code %d (subscriber unknown or error)", e.ResultCode)
+	return fmt.Sprintf("s6c: HSS returned result-code %d (subscriber unknown)", e.ResultCode)
+}
+
+// ErrResult is any other non-success S6c answer, e.g. MWD list full (5558)
+// or an HSS-side failure. Unlike ErrUnknownUser it says nothing about
+// whether the subscriber exists.
+type ErrResult struct {
+	Command      string
+	ResultCode   uint32
+	Experimental bool // code came from Experimental-Result (vendor 10415)
+}
+
+func (e *ErrResult) Error() string {
+	kind := "result-code"
+	if e.Experimental {
+		kind = "experimental-result-code"
+	}
+	return fmt.Sprintf("s6c: %s answer %s %d", e.Command, kind, e.ResultCode)
+}
+
+// answerError classifies a non-success answer.
+func answerError(command string, resultCode uint32, experimental bool) error {
+	if experimental && resultCode == diameterErrorUserUnknown {
+		return &ErrUnknownUser{ResultCode: resultCode}
+	}
+	return &ErrResult{Command: command, ResultCode: resultCode, Experimental: experimental}
 }
 
 func parseSRIAnswer(msg *dcodec.Message) (*RoutingInfo, error) {
-	resultCode := parseResultCode(msg)
+	resultCode, experimental := parseResult(msg)
 	if resultCode != dcodec.DiameterSuccess {
-		return nil, &ErrUnknownUser{ResultCode: resultCode}
+		return nil, answerError("SRI-SM", resultCode, experimental)
 	}
 
 	info := &RoutingInfo{
@@ -57,12 +88,13 @@ func parseSRIAnswer(msg *dcodec.Message) (*RoutingInfo, error) {
 }
 
 func parseRSDSAnswer(msg *dcodec.Message) (*ReportDeliveryResult, error) {
+	resultCode, experimental := parseResult(msg)
 	result := &ReportDeliveryResult{
 		SessionID:  parseStringAVP(msg, dcodec.CodeSessionID, 0),
-		ResultCode: parseResultCode(msg),
+		ResultCode: resultCode,
 	}
 	if result.ResultCode != dcodec.DiameterSuccess {
-		return nil, &ErrUnknownUser{ResultCode: result.ResultCode}
+		return nil, answerError("RSDS", resultCode, experimental)
 	}
 	if mwd := msg.FindAVP(dcodec.CodeMWDStatusS6c, dcodec.Vendor3GPP); mwd != nil {
 		result.MWDStatus, _ = mwd.Uint32()
@@ -129,15 +161,32 @@ func sendAlertServiceCentreAnswer(peer *diameter.Peer, req *dcodec.Message, resu
 }
 
 func parseResultCode(msg *dcodec.Message) uint32 {
-	rc := msg.FindAVP(dcodec.CodeResultCode, 0)
-	if rc == nil {
-		return dcodec.DiameterUnableToComply
+	code, _ := parseResult(msg)
+	return code
+}
+
+// parseResult returns the answer's Result-Code or, when absent, the
+// Experimental-Result-Code (3GPP application errors such as user unknown or
+// MWD list full are sent that way). experimental reports which one was used.
+// A missing or malformed result yields DIAMETER_UNABLE_TO_COMPLY.
+func parseResult(msg *dcodec.Message) (code uint32, experimental bool) {
+	if rc := msg.FindAVP(dcodec.CodeResultCode, 0); rc != nil {
+		if v, err := rc.Uint32(); err == nil {
+			return v, false
+		}
 	}
-	resultCode, err := rc.Uint32()
-	if err != nil {
-		return dcodec.DiameterUnableToComply
+	if exp := msg.FindAVP(dcodec.CodeExperimentalResult, 0); exp != nil {
+		if children, err := dcodec.DecodeGrouped(exp); err == nil {
+			for _, child := range children {
+				if child.Code == dcodec.CodeExperimentalResultCode && child.VendorID == 0 {
+					if v, err := child.Uint32(); err == nil {
+						return v, true
+					}
+				}
+			}
+		}
 	}
-	return resultCode
+	return dcodec.DiameterUnableToComply, false
 }
 
 func parseStringAVP(msg *dcodec.Message, code, vendorID uint32) string {

@@ -133,7 +133,7 @@ func (c *Config) applyDefaults() {
 		c.SMSC.MaxQueueLifetime = 7 * 24 * time.Hour
 	}
 	if c.SMSC.SGdTFATimeout <= 0 {
-		c.SMSC.SGdTFATimeout = 30 * time.Second
+		c.SMSC.SGdTFATimeout = 40 * time.Second // keep above the MME's SMS transaction timeout
 	}
 	// Build Listen addresses from address+port fields when provided.
 	if c.SMPP.Server.Address != "" || c.SMPP.Server.Port != 0 {

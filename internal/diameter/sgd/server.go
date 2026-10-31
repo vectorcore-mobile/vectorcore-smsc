@@ -33,8 +33,10 @@ const gracefulStopTimeout = 5 * time.Second
 
 // DefaultTFATimeout is how long SendOFR waits for the MME's
 // MT-Forward-Short-Message-Answer. It covers paging the UE and the NAS
-// round trip, so it must comfortably exceed typical MME paging timers.
-const DefaultTFATimeout = 30 * time.Second
+// round trip, and must stay above the MME's own SMS transaction timeout
+// (30s by default in vectorcore-mme) so the MME's answer, success or
+// failure, arrives before the SMSC gives up and retries.
+const DefaultTFATimeout = 40 * time.Second
 
 // OnMessageFunc is called for each decoded MO/MT message.
 type OnMessageFunc func(msg *codec.Message, peerName string)
@@ -67,13 +69,73 @@ type pendingMORequest struct {
 	req  *dcodec.Message
 }
 
-// OFAResultError captures a non-success SGd OFA result code.
+// TS 29.338 §7.4.3 SGd experimental result codes (Experimental-Result,
+// Vendor-Id 10415) returned in MT-Forward-Short-Message-Answer.
+const (
+	ResultErrorAbsentUser           uint32 = 5550
+	ResultErrorUserBusyForMTSMS     uint32 = 5551
+	ResultErrorFacilityNotSupported uint32 = 5552
+	ResultErrorIllegalUser          uint32 = 5553
+	ResultErrorIllegalEquipment     uint32 = 5554
+	ResultErrorSMDeliveryFailure    uint32 = 5555
+)
+
+// SM-Enumerated-Delivery-Failure-Cause values (TS 29.338 §7.3.5), sent with
+// DIAMETER_ERROR_SM_DELIVERY_FAILURE.
+const (
+	DeliveryFailureMemoryCapacityExceeded uint32 = 0
+	DeliveryFailureEquipmentProtocolError uint32 = 1
+	DeliveryFailureEquipmentNotSMEquipped uint32 = 2
+	DeliveryFailureUnknownServiceCentre   uint32 = 3
+	DeliveryFailureSCCongestion           uint32 = 4
+	DeliveryFailureInvalidSMEAddress      uint32 = 5
+	DeliveryFailureUserNotSCUser          uint32 = 6
+)
+
+// OFAResultError captures a non-success answer to an MT-Forward request
+// (see the naming note in the package doc).
 type OFAResultError struct {
-	ResultCode uint32
+	ResultCode   uint32
+	Experimental bool // ResultCode came from Experimental-Result (vendor 10415)
+	// DeliveryFailureCause is SM-Enumerated-Delivery-Failure-Cause when the
+	// MME sent SM-Delivery-Failure-Cause (with ResultErrorSMDeliveryFailure).
+	DeliveryFailureCause *uint32
 }
 
 func (e *OFAResultError) Error() string {
-	return fmt.Sprintf("sgd: OFA returned result-code %d", e.ResultCode)
+	kind := "result-code"
+	if e.Experimental {
+		kind = "experimental-result-code"
+	}
+	if e.DeliveryFailureCause != nil {
+		return fmt.Sprintf("sgd: OFA returned %s %d (delivery failure cause %d)", kind, e.ResultCode, *e.DeliveryFailureCause)
+	}
+	return fmt.Sprintf("sgd: OFA returned %s %d", kind, e.ResultCode)
+}
+
+// ofaError returns nil for a successful MT-Forward answer, otherwise an
+// *OFAResultError describing the failure.
+func ofaError(ans *dcodec.Message) error {
+	code, experimental, ok := resultCodeExperimental(ans)
+	if !ok {
+		return &OFAResultError{ResultCode: dcodec.DiameterUnableToComply}
+	}
+	if code == dcodec.DiameterSuccess && !experimental {
+		return nil
+	}
+	e := &OFAResultError{ResultCode: code, Experimental: experimental}
+	if grp := ans.FindAVP(dcodec.CodeSMDeliveryFailureCause, dcodec.Vendor3GPP); grp != nil {
+		if children, err := dcodec.DecodeGrouped(grp); err == nil {
+			for _, child := range children {
+				if child.Code == dcodec.CodeSMEnumeratedDeliveryFailureCause && child.VendorID == dcodec.Vendor3GPP {
+					if v, err := child.Uint32(); err == nil {
+						e.DeliveryFailureCause = &v
+					}
+				}
+			}
+		}
+	}
+	return e
 }
 
 // NewServer creates an SGd server.
@@ -320,6 +382,7 @@ func (s *Server) SendOFR(ctx context.Context, msg *codec.Message, mmeHost, scAdd
 	select {
 	case ans := <-replyCh:
 		resultCode := resultCode(ans)
+		ofaErr := ofaError(ans)
 		slog.Debug("sgd OFA received",
 			"id", msg.ID,
 			"kind", msg.KindOrDefault(),
@@ -330,11 +393,9 @@ func (s *Server) SendOFR(ctx context.Context, msg *codec.Message, mmeHost, scAdd
 			"peer", peerLogName(p),
 			"hop_by_hop", req.Header.HopByHop,
 			"result_code", resultCode,
+			"err", ofaErr,
 		)
-		if resultCode != dcodec.DiameterSuccess {
-			return &OFAResultError{ResultCode: resultCode}
-		}
-		return nil
+		return ofaErr
 	case <-time.After(tfaTimeout):
 		slog.Warn("sgd OFA timeout",
 			"id", msg.ID,
@@ -533,12 +594,19 @@ func resultCode(msg *dcodec.Message) uint32 {
 }
 
 func resultCodeOK(msg *dcodec.Message) (uint32, bool) {
+	code, _, ok := resultCodeExperimental(msg)
+	return code, ok
+}
+
+// resultCodeExperimental returns the Result-Code or, when absent, the
+// Experimental-Result-Code, and whether the latter was used.
+func resultCodeExperimental(msg *dcodec.Message) (code uint32, experimental, ok bool) {
 	if msg == nil {
-		return 0, false
+		return 0, false, false
 	}
 	if rc := msg.FindAVP(dcodec.CodeResultCode, 0); rc != nil {
 		if code, err := rc.Uint32(); err == nil {
-			return code, true
+			return code, false, true
 		}
 	}
 	if exp := msg.FindAVP(dcodec.CodeExperimentalResult, 0); exp != nil {
@@ -550,12 +618,12 @@ func resultCodeOK(msg *dcodec.Message) (uint32, bool) {
 				}
 				code, err := child.Uint32()
 				if err == nil {
-					return code, true
+					return code, true, true
 				}
 			}
 		}
 	}
-	return 0, false
+	return 0, false, false
 }
 
 func buildOFRRequest(localFQDN, localRealm, mmeHost, mmeRealm string, avps []*dcodec.AVP) *dcodec.Message {

@@ -7,6 +7,8 @@ import (
 
 	"github.com/svinson1121/vectorcore-smsc/internal/codec"
 	"github.com/svinson1121/vectorcore-smsc/internal/codec/tpdu"
+	dcodec "github.com/svinson1121/vectorcore-smsc/internal/diameter/codec"
+	s6cdiam "github.com/svinson1121/vectorcore-smsc/internal/diameter/s6c"
 	"github.com/svinson1121/vectorcore-smsc/internal/numbering"
 	"github.com/svinson1121/vectorcore-smsc/internal/store"
 )
@@ -207,4 +209,51 @@ func TestReportSkipsStatusReport(t *testing.T) {
 func TestReportWithoutDispatcherDoesNotPanic(t *testing.T) {
 	c := New(&drTestStore{}, nil, nil, "+15550000000")
 	c.Report(context.Background(), originalSGdMessage(), StatusDelivered)
+}
+
+type rsdsCall struct {
+	msisdn, imsi, scAddr, corrID string
+	cause                        uint32
+}
+
+type captureRSDS struct{ calls []rsdsCall }
+
+func (c *captureRSDS) ReportDelivery(msisdn, imsi, scAddr, corrID string, cause uint32, _ *uint32) (*s6cdiam.ReportDeliveryResult, error) {
+	c.calls = append(c.calls, rsdsCall{msisdn, imsi, scAddr, corrID, cause})
+	return &s6cdiam.ReportDeliveryResult{}, nil
+}
+
+type subscriberStore struct {
+	drTestStore
+	sub *store.Subscriber
+}
+
+func (s *subscriberStore) GetSubscriber(context.Context, string) (*store.Subscriber, error) {
+	return s.sub, nil
+}
+
+func TestReportDeferredSendsAbsentUserRSDS(t *testing.T) {
+	st := &subscriberStore{sub: &store.Subscriber{MSISDN: "989100000111", IMSI: "432600000000111"}}
+	rsds := &captureRSDS{}
+	c := New(st, nil, nil, "+15550000000")
+	c.SetS6cReporter(rsds)
+
+	c.ReportDeferred(context.Background(), store.Message{
+		ID:                 "m1",
+		DstMSISDN:          "989100000111",
+		AlertCorrelationID: "c21zYzptMQ==",
+		DeferredInterface:  "sgd",
+	}, dcodec.SMDeliveryCauseAbsentUser)
+
+	if len(rsds.calls) != 1 {
+		t.Fatalf("RSDS calls = %d, want 1", len(rsds.calls))
+	}
+	got := rsds.calls[0]
+	want := rsdsCall{"989100000111", "432600000000111", "+15550000000", "c21zYzptMQ==", dcodec.SMDeliveryCauseAbsentUser}
+	if got != want {
+		t.Fatalf("RSDS = %+v, want %+v", got, want)
+	}
+	if len(st.reports) != 0 {
+		t.Fatal("ReportDeferred must not record a delivery report: the message is still pending")
+	}
 }

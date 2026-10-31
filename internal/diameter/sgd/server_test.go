@@ -2,6 +2,7 @@ package sgd
 
 import (
 	"encoding/base64"
+	"errors"
 	"testing"
 
 	"github.com/svinson1121/vectorcore-smsc/internal/diameter"
@@ -179,3 +180,67 @@ func TestParseAlertServiceCentreReadsCorrelationAndSCAddress(t *testing.T) {
 		t.Fatalf("AlertCorrelationID = %q, want %q", got, want)
 	}
 }
+
+func TestOFAErrorClassifiesAnswer(t *testing.T) {
+	expResult := func(code uint32) *dcodec.AVP {
+		avp, err := dcodec.NewGrouped(dcodec.CodeExperimentalResult, 0, dcodec.FlagMandatory, []*dcodec.AVP{
+			dcodec.NewUint32(dcodec.CodeVendorID, 0, dcodec.FlagMandatory, dcodec.Vendor3GPP),
+			dcodec.NewUint32(dcodec.CodeExperimentalResultCode, 0, dcodec.FlagMandatory, code),
+		})
+		if err != nil {
+			t.Fatalf("NewGrouped() error = %v", err)
+		}
+		return avp
+	}
+	failureCause := func(cause uint32) *dcodec.AVP {
+		avp, err := dcodec.NewGrouped(dcodec.CodeSMDeliveryFailureCause, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, []*dcodec.AVP{
+			dcodec.NewUint32(dcodec.CodeSMEnumeratedDeliveryFailureCause, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, cause),
+		})
+		if err != nil {
+			t.Fatalf("NewGrouped() error = %v", err)
+		}
+		return avp
+	}
+	answer := func(avps ...*dcodec.AVP) *dcodec.Message {
+		b := dcodec.NewRequest(dcodec.CmdMTForwardShortMessage, dcodec.App3GPP_SGd)
+		b.Add(avps...)
+		return b.Build()
+	}
+
+	if err := ofaError(answer(dcodec.NewUint32(dcodec.CodeResultCode, 0, dcodec.FlagMandatory, dcodec.DiameterSuccess))); err != nil {
+		t.Fatalf("success: err = %v, want nil", err)
+	}
+
+	cases := []struct {
+		name      string
+		ans       *dcodec.Message
+		wantCode  uint32
+		wantExp   bool
+		wantCause *uint32
+	}{
+		{"base 3002", answer(dcodec.NewUint32(dcodec.CodeResultCode, 0, dcodec.FlagMandatory, dcodec.DiameterUnableToDeliver)), dcodec.DiameterUnableToDeliver, false, nil},
+		{"absent user", answer(expResult(ResultErrorAbsentUser)), ResultErrorAbsentUser, true, nil},
+		{"memory full", answer(expResult(ResultErrorSMDeliveryFailure), failureCause(DeliveryFailureMemoryCapacityExceeded)), ResultErrorSMDeliveryFailure, true, u32(DeliveryFailureMemoryCapacityExceeded)},
+		{"protocol error", answer(expResult(ResultErrorSMDeliveryFailure), failureCause(DeliveryFailureEquipmentProtocolError)), ResultErrorSMDeliveryFailure, true, u32(DeliveryFailureEquipmentProtocolError)},
+		{"no result", answer(), dcodec.DiameterUnableToComply, false, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var e *OFAResultError
+			if !errors.As(ofaError(tc.ans), &e) {
+				t.Fatalf("err is not *OFAResultError")
+			}
+			if e.ResultCode != tc.wantCode || e.Experimental != tc.wantExp {
+				t.Fatalf("got %d/%v, want %d/%v", e.ResultCode, e.Experimental, tc.wantCode, tc.wantExp)
+			}
+			switch {
+			case tc.wantCause == nil && e.DeliveryFailureCause != nil:
+				t.Fatalf("DeliveryFailureCause = %d, want nil", *e.DeliveryFailureCause)
+			case tc.wantCause != nil && (e.DeliveryFailureCause == nil || *e.DeliveryFailureCause != *tc.wantCause):
+				t.Fatalf("DeliveryFailureCause = %v, want %d", e.DeliveryFailureCause, *tc.wantCause)
+			}
+		})
+	}
+}
+
+func u32(v uint32) *uint32 { return &v }

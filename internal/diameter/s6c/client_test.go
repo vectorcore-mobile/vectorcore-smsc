@@ -2,6 +2,7 @@ package s6c
 
 import (
 	"encoding/base64"
+	"errors"
 	"testing"
 	"time"
 
@@ -257,5 +258,112 @@ func TestParseAlertServiceCentreMaximumUEAvailabilityTimeOptional(t *testing.T) 
 	}
 	if req.MaximumUEAvailabilityTime == nil {
 		t.Fatal("MaximumUEAvailabilityTime = nil, want value")
+	}
+}
+
+func experimentalResult(t *testing.T, code uint32) *dcodec.AVP {
+	t.Helper()
+	avp, err := dcodec.NewGrouped(dcodec.CodeExperimentalResult, 0, dcodec.FlagMandatory, []*dcodec.AVP{
+		dcodec.NewUint32(dcodec.CodeVendorID, 0, dcodec.FlagMandatory, dcodec.Vendor3GPP),
+		dcodec.NewUint32(dcodec.CodeExperimentalResultCode, 0, dcodec.FlagMandatory, code),
+	})
+	if err != nil {
+		t.Fatalf("NewGrouped() error = %v", err)
+	}
+	return avp
+}
+
+func TestParseResultReadsExperimentalResult(t *testing.T) {
+	cases := []struct {
+		name             string
+		avps             []*dcodec.AVP
+		wantCode         uint32
+		wantExperimental bool
+	}{
+		{"result-code", []*dcodec.AVP{dcodec.NewUint32(dcodec.CodeResultCode, 0, dcodec.FlagMandatory, dcodec.DiameterSuccess)}, dcodec.DiameterSuccess, false},
+		{"experimental-result", []*dcodec.AVP{experimentalResult(t, 5558)}, 5558, true},
+		{"neither", nil, dcodec.DiameterUnableToComply, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := dcodec.NewRequest(dcodec.CmdReportSMDeliveryStatus, dcodec.App3GPP_S6c)
+			b.Add(tc.avps...)
+			code, experimental := parseResult(b.Build())
+			if code != tc.wantCode || experimental != tc.wantExperimental {
+				t.Fatalf("parseResult() = %d, %v; want %d, %v", code, experimental, tc.wantCode, tc.wantExperimental)
+			}
+		})
+	}
+}
+
+func TestParseAnswersClassifyHSSErrors(t *testing.T) {
+	answer := func(avps ...*dcodec.AVP) *dcodec.Message {
+		b := dcodec.NewRequest(dcodec.CmdSendRoutingInfoSM, dcodec.App3GPP_S6c)
+		b.Add(avps...)
+		return b.Build()
+	}
+
+	// 3GPP DIAMETER_ERROR_USER_UNKNOWN → subscriber unknown.
+	_, err := parseSRIAnswer(answer(experimentalResult(t, 5001)))
+	var unknown *ErrUnknownUser
+	if !errors.As(err, &unknown) || unknown.ResultCode != 5001 {
+		t.Fatalf("SRI-SM user unknown: err = %v, want ErrUnknownUser(5001)", err)
+	}
+
+	// Base Result-Code 5001 is DIAMETER_AVP_UNSUPPORTED, not user unknown.
+	_, err = parseSRIAnswer(answer(dcodec.NewUint32(dcodec.CodeResultCode, 0, dcodec.FlagMandatory, 5001)))
+	var result *ErrResult
+	if !errors.As(err, &result) || result.Experimental {
+		t.Fatalf("SRI-SM base 5001: err = %v, want non-experimental ErrResult", err)
+	}
+
+	// MWD list full on RSDS is an error, but not "subscriber unknown".
+	_, err = parseRSDSAnswer(answer(experimentalResult(t, 5558)))
+	if !errors.As(err, &result) || result.ResultCode != 5558 || !result.Experimental || result.Command != "RSDS" {
+		t.Fatalf("RSDS MWD list full: err = %v, want ErrResult(RSDS, 5558, experimental)", err)
+	}
+	if errors.As(err, &unknown) {
+		t.Fatal("MWD list full must not be reported as an unknown subscriber")
+	}
+
+	// HSS-side failure on SRI-SM.
+	_, err = parseSRIAnswer(answer(dcodec.NewUint32(dcodec.CodeResultCode, 0, dcodec.FlagMandatory, dcodec.DiameterUnableToComply)))
+	if !errors.As(err, &result) || result.ResultCode != dcodec.DiameterUnableToComply {
+		t.Fatalf("SRI-SM unable to comply: err = %v, want ErrResult(5012)", err)
+	}
+}
+
+func TestBuildSMDeliveryOutcomeUsesMMEDeliveryOutcome(t *testing.T) {
+	diag := uint32(1)
+	outcome, err := buildSMDeliveryOutcome(dcodec.SMDeliveryCauseAbsentUser, &diag)
+	if err != nil {
+		t.Fatalf("buildSMDeliveryOutcome() error = %v", err)
+	}
+	if outcome.Code != dcodec.CodeSMDeliveryOutcomeS6c || outcome.VendorID != dcodec.Vendor3GPP {
+		t.Fatalf("outer AVP = %d/%d, want SM-Delivery-Outcome", outcome.Code, outcome.VendorID)
+	}
+	nodes, err := dcodec.DecodeGrouped(outcome)
+	if err != nil || len(nodes) != 1 {
+		t.Fatalf("decode SM-Delivery-Outcome = %v, %v", nodes, err)
+	}
+	if nodes[0].Code != dcodec.CodeMMEDeliveryOutcome || nodes[0].VendorID != dcodec.Vendor3GPP {
+		t.Fatalf("node outcome AVP = %d, want MME-Delivery-Outcome (3317)", nodes[0].Code)
+	}
+	inner, err := dcodec.DecodeGrouped(nodes[0])
+	if err != nil {
+		t.Fatalf("decode MME-Delivery-Outcome: %v", err)
+	}
+	var gotCause, gotDiag uint32
+	for _, a := range inner {
+		v, _ := a.Uint32()
+		switch a.Code {
+		case dcodec.CodeSMDeliveryCause:
+			gotCause = v
+		case dcodec.CodeAbsentUserDiagnosticSM:
+			gotDiag = v
+		}
+	}
+	if gotCause != dcodec.SMDeliveryCauseAbsentUser || gotDiag != 1 {
+		t.Fatalf("cause/diagnostic = %d/%d, want %d/1", gotCause, gotDiag, dcodec.SMDeliveryCauseAbsentUser)
 	}
 }

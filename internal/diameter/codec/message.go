@@ -50,6 +50,7 @@ const Vendor3GPP uint32 = 10415
 const (
 	DiameterSuccess         uint32 = 2001
 	DiameterUnableToDeliver uint32 = 3002
+	DiameterTooBusy         uint32 = 3004
 	DiameterAVPUnsupported  uint32 = 5001
 	DiameterUnableToComply  uint32 = 5012
 )
