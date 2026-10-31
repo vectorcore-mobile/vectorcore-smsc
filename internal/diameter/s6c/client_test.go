@@ -391,3 +391,45 @@ func TestParseSRIAnswerMMENumberStrictTBCD(t *testing.T) {
 		t.Fatalf("MMENumber = %q, want 105800000001", info.MMENumber)
 	}
 }
+
+func TestDecodeMMENumber(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{"ASCII digits (Cisco-style deployments)", []byte("15550000001"), "15550000001"},
+		{"plain TBCD", encodeTBCD("15550000001"), "15550000001"},
+		{"TBCD that looks like len+NOA (issue #2)", encodeTBCD("105800000001"), "105800000001"},
+		{"TBCD containing 3s", encodeTBCD("13320003"), "13320003"},
+		{"TBCD country code 98", encodeTBCD("989100000001"), "989100000001"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := decodeMMENumber(tc.data); got != tc.want {
+				t.Fatalf("decodeMMENumber(% X) = %q, want %q", tc.data, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseSRIAnswerAcceptsASCIIMMENumber(t *testing.T) {
+	servingNode, err := dcodec.NewGrouped(dcodec.CodeServingNode, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific,
+		[]*dcodec.AVP{
+			dcodec.NewString(dcodec.CodeMMEName, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, "mme-cisco.epc.example.net"),
+			dcodec.NewOctetString(dcodec.CodeMMENumberForMTSMSS6c, dcodec.Vendor3GPP, dcodec.FlagVendorSpecific, []byte("15550000001")),
+		})
+	if err != nil {
+		t.Fatalf("NewGrouped() error = %v", err)
+	}
+	info, err := parseSRIAnswer(&dcodec.Message{AVPs: []*dcodec.AVP{
+		dcodec.NewUint32(dcodec.CodeResultCode, 0, dcodec.FlagMandatory, dcodec.DiameterSuccess),
+		servingNode,
+	}})
+	if err != nil {
+		t.Fatalf("parseSRIAnswer() error = %v", err)
+	}
+	if info.MMENumber != "15550000001" {
+		t.Fatalf("MMENumber = %q, want 15550000001", info.MMENumber)
+	}
+}

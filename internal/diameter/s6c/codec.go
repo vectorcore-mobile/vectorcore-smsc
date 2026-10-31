@@ -77,9 +77,7 @@ func parseSRIAnswer(msg *dcodec.Message) (*RoutingInfo, error) {
 			case child.Code == dcodec.CodeMMEName && child.VendorID == dcodec.Vendor3GPP:
 				info.MMEName = string(child.Data)
 			case (child.Code == dcodec.CodeMMENumberForMTSMSS6c || child.Code == dcodec.CodeMMENumberForMTSMSServing) && child.VendorID == dcodec.Vendor3GPP:
-				// TBCD string (TS 29.272 §7.3.157); decoded strictly, since a
-				// prefix can't be told apart from digits reliably.
-				info.MMENumber = decodeTBCD(child.Data)
+				info.MMENumber = decodeMMENumber(child.Data)
 			case child.Code == dcodec.CodeMMERealm && child.VendorID == dcodec.Vendor3GPP:
 				info.MMERealm = string(child.Data)
 			}
@@ -87,6 +85,20 @@ func parseSRIAnswer(msg *dcodec.Message) (*RoutingInfo, error) {
 		info.Attached = info.MMEName != ""
 	}
 	return info, nil
+}
+
+// decodeMMENumber decodes MME-Number-for-MT-SMS. The standard form is a
+// plain TBCD string (TS 29.272 §7.3.157); some deployments (e.g. with a Cisco
+// MME, which also needs sgd_sc_address_encoding: ascii_digits) deliver it as
+// ASCII digits, so a value made only of '0'-'9' octets is taken as ASCII.
+// No length/TON prefix is guessed (issue #2). A TBCD number whose every
+// octet falls in 0x30-0x39 would need every second digit to be 3, which
+// real MME numbers don't have.
+func decodeMMENumber(data []byte) string {
+	if isDigitString(string(data)) {
+		return string(data)
+	}
+	return decodeTBCD(data)
 }
 
 func parseRSDSAnswer(msg *dcodec.Message) (*ReportDeliveryResult, error) {
