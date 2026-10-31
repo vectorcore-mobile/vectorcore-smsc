@@ -1,8 +1,10 @@
 package sh
 
 import (
+	"bytes"
 	"testing"
 
+	sgdcodec "github.com/svinson1121/vectorcore-smsc/internal/codec/sgd"
 	"github.com/svinson1121/vectorcore-smsc/internal/diameter"
 	dcodec "github.com/svinson1121/vectorcore-smsc/internal/diameter/codec"
 )
@@ -13,6 +15,7 @@ func TestBuildUDRRequestIncludesRequired3GPPAVPs(t *testing.T) {
 		"hss.example.net",
 		"example.net",
 		"3342012832",
+		sgdcodec.MSISDNEncodingTBCD,
 		"smsc.example.net;1;1",
 		0x11223344,
 	)
@@ -68,6 +71,72 @@ func TestBuildUDRRequestIncludesRequired3GPPAVPs(t *testing.T) {
 	}
 	if !msisdnFound {
 		t.Fatal("User-Identity missing MSISDN AVP")
+	}
+}
+
+func udrMSISDN(t *testing.T, msisdn string, enc sgdcodec.MSISDNEncoding) []byte {
+	t.Helper()
+	msg, err := buildUDRRequest(
+		diameter.Config{LocalFQDN: "smsc.example.net", LocalRealm: "example.net"},
+		"hss.example.net", "example.net", msisdn, enc, "smsc.example.net;1;1", 1,
+	)
+	if err != nil {
+		t.Fatalf("buildUDRRequest() error = %v", err)
+	}
+	userIdentity := msg.FindAVP(dcodec.CodeUserIdentity, dcodec.Vendor3GPP)
+	if userIdentity == nil {
+		t.Fatal("missing User-Identity")
+	}
+	children, err := dcodec.DecodeGrouped(userIdentity)
+	if err != nil {
+		t.Fatalf("DecodeGrouped(User-Identity) error = %v", err)
+	}
+	for _, child := range children {
+		if child.Code == dcodec.CodeMSISDN && child.VendorID == dcodec.Vendor3GPP {
+			return child.Data
+		}
+	}
+	t.Fatal("User-Identity missing MSISDN AVP")
+	return nil
+}
+
+// TS 29.329 §6.3.2: the MSISDN AVP is plain TBCD with no length or NOA octet.
+func TestBuildUDRRequestMSISDNPlainTBCD(t *testing.T) {
+	tests := []struct {
+		msisdn string
+		want   []byte
+	}{
+		{"989100000555", []byte{0x89, 0x19, 0x00, 0x00, 0x50, 0x55}},
+		{"491532547600", []byte{0x94, 0x51, 0x23, 0x45, 0x67, 0x00}},
+		{"105800000001", []byte{0x01, 0x85, 0x00, 0x00, 0x00, 0x10}},
+		{"334201283", []byte{0x33, 0x24, 0x10, 0x82, 0xF3}},
+		{"+12345678901", []byte{0x21, 0x43, 0x65, 0x87, 0x09, 0xF1}},
+	}
+	for _, tc := range tests {
+		if got := udrMSISDN(t, tc.msisdn, sgdcodec.MSISDNEncodingTBCD); !bytes.Equal(got, tc.want) {
+			t.Errorf("MSISDN(%q) = % X, want % X", tc.msisdn, got, tc.want)
+		}
+	}
+}
+
+func TestBuildUDRRequestMSISDNLegacyPrefixed(t *testing.T) {
+	want := []byte{0x07, 0x91, 0x21, 0x43, 0x65, 0x87, 0x09, 0xF1}
+	for _, msisdn := range []string{"12345678901", "+12345678901"} {
+		if got := udrMSISDN(t, msisdn, sgdcodec.MSISDNEncodingLegacyPrefixed); !bytes.Equal(got, want) {
+			t.Errorf("MSISDN(%q) = % X, want % X", msisdn, got, want)
+		}
+	}
+}
+
+func TestClientDefaultsToPlainTBCD(t *testing.T) {
+	c := &Client{msisdnEncoding: sgdcodec.MSISDNEncodingTBCD}
+	c.SetMSISDNEncoding("")
+	if c.msisdnEncoding != sgdcodec.MSISDNEncodingTBCD {
+		t.Fatalf("empty setting = %q, want tbcd", c.msisdnEncoding)
+	}
+	c.SetMSISDNEncoding("legacy_prefixed")
+	if c.msisdnEncoding != sgdcodec.MSISDNEncodingLegacyPrefixed {
+		t.Fatalf("legacy setting = %q, want legacy_prefixed", c.msisdnEncoding)
 	}
 }
 

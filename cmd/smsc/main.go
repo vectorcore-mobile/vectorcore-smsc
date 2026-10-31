@@ -657,7 +657,9 @@ func run(cfgPath string) error {
 				sgdServer.AttachOutboundPeer(want.peer.Name, p)
 			}
 			if slices.Contains(want.apps, "sh") {
-				activeShClients[name] = sh.NewClient(p)
+				shClient := sh.NewClient(p)
+				shClient.SetMSISDNEncoding(cfg.SMSC.ShMSISDNEncoding)
+				activeShClients[name] = shClient
 			}
 			if slices.Contains(want.apps, "s6c") {
 				s6cClient := s6c.NewClient(p, scAddr)

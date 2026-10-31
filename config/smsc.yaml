@@ -3,6 +3,7 @@ smsc:
   sgd_sc_address_encoding: ascii_digits  # tbcd | ascii_digits
   max_queue_lifetime: 168h  # global max queued/waiting lifetime before expiry
   sgd_msisdn_encoding: tbcd # tbcd (TS 29.329, standard) | legacy_prefixed (peers sending len|NOA|TBCD, e.g. current vectorcore-mme)
+  sh_msisdn_encoding: tbcd  # Sh UDR MSISDN: tbcd (TS 29.329, standard) | legacy_prefixed (HSSs expecting len|NOA|TBCD, e.g. vectorcore-hss before the Sh MSISDN fix)
   sgd_tfa_timeout: 40s      # wait for the MME's MT-Forward answer (covers UE paging); keep above the MME's SMS transaction timeout
 
 numbering:

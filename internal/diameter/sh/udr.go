@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	sgdcodec "github.com/svinson1121/vectorcore-smsc/internal/codec/sgd"
 	"github.com/svinson1121/vectorcore-smsc/internal/diameter"
 	dcodec "github.com/svinson1121/vectorcore-smsc/internal/diameter/codec"
 )
@@ -33,7 +34,8 @@ type UserDataResult struct {
 
 // Client manages a Sh connection to the HSS and correlates UDR/UDA exchanges.
 type Client struct {
-	peer *diameter.Peer
+	peer           *diameter.Peer
+	msisdnEncoding sgdcodec.MSISDNEncoding
 
 	mu      sync.Mutex
 	pending map[uint32]chan *dcodec.Message // keyed by HopByHop
@@ -42,8 +44,9 @@ type Client struct {
 // NewClient wraps a Peer as a Sh client.
 func NewClient(peer *diameter.Peer) *Client {
 	c := &Client{
-		peer:    peer,
-		pending: make(map[uint32]chan *dcodec.Message),
+		peer:           peer,
+		msisdnEncoding: sgdcodec.MSISDNEncodingTBCD,
+		pending:        make(map[uint32]chan *dcodec.Message),
 	}
 	peer.AddOnMessageHandler(c.dispatch)
 	return c
@@ -51,6 +54,13 @@ func NewClient(peer *diameter.Peer) *Client {
 
 // Peer returns the underlying diameter.Peer (so callers can call Start/Stop).
 func (c *Client) Peer() *diameter.Peer { return c.peer }
+
+// SetMSISDNEncoding sets the wire format of the UDR User-Identity MSISDN:
+// "tbcd" (TS 29.329 §6.3.2, default) or "legacy_prefixed" (len|NOA|TBCD, for
+// HSSs that still expect the historical format).
+func (c *Client) SetMSISDNEncoding(v string) {
+	c.msisdnEncoding = sgdcodec.NormalizeMSISDNEncoding(v)
+}
 
 // LookupIMSState sends a UDR for the given MSISDN and returns parsed results.
 // Returns typed Sh errors when the HSS rejects the request.
@@ -61,7 +71,7 @@ func (c *Client) LookupIMSState(msisdn string) (*UserDataResult, error) {
 
 	hopByHop := dcodec.NextHopByHop()
 	sessionID := dcodec.NewSessionID(c.peer.Cfg().LocalFQDN)
-	msg, err := buildUDRRequest(c.peer.Cfg(), c.peer.RemoteFQDN, c.peer.RemoteRealm, msisdn, sessionID, hopByHop)
+	msg, err := buildUDRRequest(c.peer.Cfg(), c.peer.RemoteFQDN, c.peer.RemoteRealm, msisdn, c.msisdnEncoding, sessionID, hopByHop)
 	if err != nil {
 		return nil, err
 	}
@@ -111,8 +121,8 @@ func (c *Client) LookupIMSState(msisdn string) (*UserDataResult, error) {
 	}
 }
 
-func buildUDRRequest(cfg diameter.Config, remoteFQDN, remoteRealm, msisdn, sessionID string, hopByHop uint32) (*dcodec.Message, error) {
-	msisdnBCD := encodeBCDMSISDN(msisdn)
+func buildUDRRequest(cfg diameter.Config, remoteFQDN, remoteRealm, msisdn string, msisdnEncoding sgdcodec.MSISDNEncoding, sessionID string, hopByHop uint32) (*dcodec.Message, error) {
+	msisdnBCD := sgdcodec.EncodeMSISDN(msisdn, msisdnEncoding)
 	userIdentity, err := dcodec.NewGrouped(
 		dcodec.CodeUserIdentity, dcodec.Vendor3GPP,
 		dcodec.FlagMandatory|dcodec.FlagVendorSpecific,
@@ -272,35 +282,4 @@ func shResultError(resultCode uint32) error {
 	default:
 		return &ErrResultCode{ResultCode: resultCode}
 	}
-}
-
-// encodeBCDMSISDN encodes an MSISDN as BCD for the MSISDN AVP.
-func encodeBCDMSISDN(msisdn string) []byte {
-	international := false
-	if len(msisdn) > 0 && msisdn[0] == '+' {
-		international = true
-		msisdn = msisdn[1:]
-	}
-	noa := byte(0x81)
-	if international {
-		noa = 0x91
-	}
-	size := (len(msisdn) + 1) / 2
-	digits := make([]byte, size)
-	for i := 0; i < len(msisdn); i++ {
-		d := msisdn[i] - '0'
-		if i%2 == 0 {
-			digits[i/2] = d
-		} else {
-			digits[i/2] |= d << 4
-		}
-	}
-	if len(msisdn)%2 != 0 {
-		digits[size-1] |= 0xF0
-	}
-	result := make([]byte, 2+len(digits))
-	result[0] = byte(1 + len(digits))
-	result[1] = noa
-	copy(result[2:], digits)
-	return result
 }
