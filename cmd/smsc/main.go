@@ -279,6 +279,7 @@ func run(cfgPath string) error {
 		nil, // set below
 	)
 	sgdServer.SetTFATimeout(cfg.SMSC.SGdTFATimeout)
+	sgdServer.SetMSISDNEncoding(cfg.SMSC.SGdMSISDNEncoding)
 
 	// ── SMPP Client Manager (not started yet — callback set after forwarder) ──
 	clientMgr := smppClient.NewManager(st, smppReg, nil, smppClient.TLSOptions{

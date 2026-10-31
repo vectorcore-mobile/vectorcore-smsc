@@ -117,6 +117,7 @@ type fakeMME struct {
 	oneMTPerIMSI bool // like vectorcore-mme: a second concurrent TFR for an IMSI gets 3004
 	inFlight     map[string]bool
 	busyAnswers  int
+	legacyMSISDN bool // send MSISDN as len|0x91|TBCD like vectorcore-mme today
 }
 
 func startFakeMME(ctx context.Context, t *testing.T, host string, port int) *fakeMME {
@@ -268,7 +269,7 @@ func (m *fakeMME) sendMO(t *testing.T, submit *codec.Message) {
 		[]*dcodec.AVP{
 			dcodec.NewString(dcodec.CodeUserName, 0, dcodec.FlagMandatory, senderIMSI),
 			dcodec.NewOctetString(dcodec.CodeMSISDN, dcodec.Vendor3GPP,
-				dcodec.FlagMandatory|dcodec.FlagVendorSpecific, encodeMSISDN(senderMSISDN)),
+				dcodec.FlagMandatory|dcodec.FlagVendorSpecific, m.encodeMSISDN(senderMSISDN)),
 		})
 	if err != nil {
 		t.Fatalf("NewGrouped() error = %v", err)
@@ -322,7 +323,13 @@ func (m *fakeMME) expectNoTFR(t *testing.T, wait time.Duration) {
 	}
 }
 
-func encodeMSISDN(msisdn string) []byte {
+// encodeMSISDN encodes the MSISDN AVP as a spec-compliant MME does (plain
+// TBCD, TS 29.329 §6.3.2), or with vectorcore-mme's current len|0x91 prefix
+// when the MME is set to legacy mode.
+func (m *fakeMME) encodeMSISDN(msisdn string) []byte {
+	m.mu.Lock()
+	legacy := m.legacyMSISDN
+	m.mu.Unlock()
 	digits := make([]byte, (len(msisdn)+1)/2)
 	for i, c := range msisdn {
 		d := byte(c - '0')
@@ -334,6 +341,9 @@ func encodeMSISDN(msisdn string) []byte {
 	}
 	if len(msisdn)%2 == 1 {
 		digits[len(digits)-1] |= 0xF0
+	}
+	if !legacy {
+		return digits
 	}
 	return append([]byte{byte(1 + len(digits)), 0x91}, digits...)
 }
@@ -352,6 +362,7 @@ type harnessOptions struct {
 	tfaTimeout       time.Duration // default sgd.DefaultTFATimeout
 	expirySweep      time.Duration // >0 runs the expiry sweeper at this interval
 	retryInterval    time.Duration // >0 runs the retry scheduler at this interval
+	msisdnEncoding   string        // SMSC sgd_msisdn_encoding; default tbcd
 }
 
 func startHarness(t *testing.T) *harness {
@@ -383,6 +394,7 @@ func startHarnessWith(t *testing.T, opts harnessOptions) *harness {
 	port := freePort(t)
 	srv := sgdsrv.NewServer("tcp", fmt.Sprintf("127.0.0.1:%d", port), smscFQDN, smscRealm, "tbcd", nil)
 	srv.SetTFATimeout(opts.tfaTimeout)
+	srv.SetMSISDNEncoding(opts.msisdnEncoding)
 
 	correlator := dr.New(st, nil, nil, scAddr)
 	correlator.SetS6cReporter(hss)
@@ -875,4 +887,26 @@ func TestSGdStatusReportRejectedByHandsetFailsImmediately(t *testing.T) {
 	}
 	// No retry, and the failed report doesn't generate a report of its own.
 	h.mmeA.expectNoTFR(t, 300*time.Millisecond)
+}
+
+// With sgd_msisdn_encoding: legacy_prefixed the SMSC still interoperates with
+// an MME that sends len|0x91|TBCD (vectorcore-mme today): the sender keeps
+// its country code and gets its status report.
+func TestSGdLegacyPrefixedMSISDNPeer(t *testing.T) {
+	h := startHarnessWith(t, harnessOptions{msisdnEncoding: "legacy_prefixed"})
+	h.mmeA.mu.Lock()
+	h.mmeA.legacyMSISDN = true
+	h.mmeA.mu.Unlock()
+
+	h.mmeA.sendMO(t, submitTo(destMSISDN, 0x60, true))
+	deliver, err := tpdu.Decode(smRPUI(t, h.mmeB.nextTFR(t)))
+	if err != nil {
+		t.Fatalf("decode SMS-DELIVER: %v", err)
+	}
+	if deliver.Source.MSISDN != senderMSISDN {
+		t.Fatalf("TP-OA = %q, want %s", deliver.Source.MSISDN, senderMSISDN)
+	}
+	if got := userName(t, h.mmeA.nextTFR(t)); got != senderIMSI {
+		t.Fatalf("status report User-Name = %q, want %s", got, senderIMSI)
+	}
 }

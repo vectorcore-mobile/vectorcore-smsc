@@ -11,8 +11,8 @@ import (
 
 // HandleTFR processes an MT-Forward-Short-Message answer for an outbound send.
 // The reply is correlated elsewhere; this helper only decodes the payload shape.
-func HandleTFR(p *diameter.Peer, req *dcodec.Message, onMsg OnMessageFunc) {
-	msg, err := sgdcodec.DecodeTFR(req)
+func HandleTFR(p *diameter.Peer, req *dcodec.Message, onMsg OnMessageFunc, opts sgdcodec.AddressOptions) {
+	msg, err := sgdcodec.DecodeTFRWith(req, opts)
 	if err != nil {
 		slog.Error("sgd TFR decode failed", "peer", p.RemoteFQDN, "err", err)
 		sendAnswer(p, req, dcodec.DiameterUnableToComply)

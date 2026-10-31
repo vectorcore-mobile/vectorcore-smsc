@@ -96,7 +96,13 @@ func decodeRPData(data []byte) (*codec.Message, error) {
 	}
 
 	tpData := data[pos : pos+rpUDLen]
-	msg, err := tpdu.Decode(tpData)
+	// RP-MTI gives the direction, which TP-MTI needs: 0x02 from the UE is
+	// SMS-COMMAND, towards the UE it is SMS-STATUS-REPORT.
+	decodeTPDU := tpdu.DecodeMT
+	if data[0]&0x07 == rpMTIDataMStoSC {
+		decodeTPDU = tpdu.DecodeMO
+	}
+	msg, err := decodeTPDU(tpData)
 	if err != nil {
 		return nil, fmt.Errorf("decode TP-DATA: %w", err)
 	}

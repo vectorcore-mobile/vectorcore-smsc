@@ -367,3 +367,27 @@ func TestBuildSMDeliveryOutcomeUsesMMEDeliveryOutcome(t *testing.T) {
 		t.Fatalf("cause/diagnostic = %d/%d, want %d/1", gotCause, gotDiag, dcodec.SMDeliveryCauseAbsentUser)
 	}
 }
+
+// MME-Number-for-MT-SMS is plain TBCD. A number whose bytes look like a
+// length+NOA prefix ("1058...": 01 85 ...) must not lose its first digits.
+func TestParseSRIAnswerMMENumberStrictTBCD(t *testing.T) {
+	servingNode, err := dcodec.NewGrouped(dcodec.CodeServingNode, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific,
+		[]*dcodec.AVP{
+			dcodec.NewString(dcodec.CodeMMEName, dcodec.Vendor3GPP, dcodec.FlagMandatory|dcodec.FlagVendorSpecific, "mme-a.epc.example.net"),
+			dcodec.NewOctetString(dcodec.CodeMMENumberForMTSMSS6c, dcodec.Vendor3GPP, dcodec.FlagVendorSpecific, encodeTBCD("105800000001")),
+		})
+	if err != nil {
+		t.Fatalf("NewGrouped() error = %v", err)
+	}
+	msg := &dcodec.Message{AVPs: []*dcodec.AVP{
+		dcodec.NewUint32(dcodec.CodeResultCode, 0, dcodec.FlagMandatory, dcodec.DiameterSuccess),
+		servingNode,
+	}}
+	info, err := parseSRIAnswer(msg)
+	if err != nil {
+		t.Fatalf("parseSRIAnswer() error = %v", err)
+	}
+	if info.MMENumber != "105800000001" {
+		t.Fatalf("MMENumber = %q, want 105800000001", info.MMENumber)
+	}
+}

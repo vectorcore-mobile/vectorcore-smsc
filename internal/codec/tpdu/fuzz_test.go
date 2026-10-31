@@ -13,6 +13,8 @@ func FuzzDecode(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_, _ = Decode(data)
+		_, _ = DecodeMO(data)
+		_, _ = DecodeMT(data)
 	})
 }
 

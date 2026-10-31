@@ -15,8 +15,8 @@ import (
 //
 // In the current phase this is sent to the SGd peer (MME) that forwarded the
 // original request.  Full S6c support (separate HSS connection) is Phase 5.
-func SendRSR(ctx context.Context, p *diameter.Peer, msisdn, scAddr, scAddrEncoding string, outcome uint32) error {
-	avps, err := sgdcodec.EncodeRSR(msisdn, scAddr, scAddrEncoding, outcome)
+func SendRSR(ctx context.Context, p *diameter.Peer, msisdn, scAddr, scAddrEncoding string, msisdnEncoding sgdcodec.MSISDNEncoding, outcome uint32) error {
+	avps, err := sgdcodec.EncodeRSR(msisdn, scAddr, scAddrEncoding, msisdnEncoding, outcome)
 	if err != nil {
 		return fmt.Errorf("sgd RSR encode: %w", err)
 	}

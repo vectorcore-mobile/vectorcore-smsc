@@ -2,6 +2,7 @@ package tpdu
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -160,5 +161,57 @@ func TestEncodeMTRejectsMSToSCRawTPDU(t *testing.T) {
 	// TP-MTI=01 is SMS-SUBMIT, which never travels SC→MS.
 	if _, err := EncodeMT(&codec.Message{RawTPDU: []byte{0x01, 0x00}}); err == nil {
 		t.Fatal("EncodeMT accepted an SMS-SUBMIT as MT TP-DATA")
+	}
+}
+
+// smsCommand is an SMS-COMMAND (TS 23.040 §9.2.2.4): enquiry (TP-CT=0) about
+// message number 0x2A to 989100000111.
+var smsCommand = []byte{
+	0x02,                                           // TP-MTI=10 (MS→SC: SMS-COMMAND)
+	0x07,                                           // TP-MR
+	0x00,                                           // TP-PID
+	0x00,                                           // TP-CT: enquiry
+	0x2A,                                           // TP-MN
+	0x0C, 0x91, 0x89, 0x19, 0x00, 0x00, 0x10, 0x11, // TP-DA
+	0x00, // TP-CDL
+}
+
+func TestDecodeMOByMTI(t *testing.T) {
+	submit, err := EncodeSubmit(&codec.Message{Destination: codec.Address{MSISDN: "989100000111"}, Text: "hi", Encoding: codec.EncodingGSM7, TPMR: 7})
+	if err != nil {
+		t.Fatalf("EncodeSubmit() error = %v", err)
+	}
+	if msg, err := DecodeMO(submit); err != nil || msg.Destination.MSISDN != "989100000111" || msg.TPMR != 7 {
+		t.Fatalf("DecodeMO(SMS-SUBMIT) = %+v, %v", msg, err)
+	}
+	if _, err := DecodeMO(smsCommand); err == nil || !strings.Contains(err.Error(), "SMS-COMMAND") {
+		t.Fatalf("DecodeMO(SMS-COMMAND) error = %v, want SMS-COMMAND rejection", err)
+	}
+	if _, err := DecodeMO([]byte{0x00, 0x00, 0x00}); err == nil {
+		t.Fatal("DecodeMO accepted an SMS-DELIVER-REPORT")
+	}
+	if _, err := DecodeMO([]byte{0x03, 0x00}); err == nil {
+		t.Fatal("DecodeMO accepted reserved TP-MTI 0x03")
+	}
+}
+
+func TestDecodeMTByMTI(t *testing.T) {
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	deliver, err := EncodeDeliver(&codec.Message{Source: codec.Address{MSISDN: "989100000555"}, Text: "hi", Encoding: codec.EncodingGSM7, Timestamp: now})
+	if err != nil {
+		t.Fatalf("EncodeDeliver() error = %v", err)
+	}
+	if msg, err := DecodeMT(deliver); err != nil || msg.Source.MSISDN != "989100000555" {
+		t.Fatalf("DecodeMT(SMS-DELIVER) = %+v, %v", msg, err)
+	}
+	report, err := EncodeStatusReport(0x2A, codec.Address{MSISDN: "989100000111"}, now, now, STReceivedBySME)
+	if err != nil {
+		t.Fatalf("EncodeStatusReport() error = %v", err)
+	}
+	if msg, err := DecodeMT(report); err != nil || msg.TPMR != 0x2A || msg.TPStatus != STReceivedBySME {
+		t.Fatalf("DecodeMT(SMS-STATUS-REPORT) = %+v, %v", msg, err)
+	}
+	if _, err := DecodeMT([]byte{0x01, 0x00, 0x00}); err == nil {
+		t.Fatal("DecodeMT accepted an SMS-SUBMIT-REPORT")
 	}
 }

@@ -77,7 +77,9 @@ func parseSRIAnswer(msg *dcodec.Message) (*RoutingInfo, error) {
 			case child.Code == dcodec.CodeMMEName && child.VendorID == dcodec.Vendor3GPP:
 				info.MMEName = string(child.Data)
 			case (child.Code == dcodec.CodeMMENumberForMTSMSS6c || child.Code == dcodec.CodeMMENumberForMTSMSServing) && child.VendorID == dcodec.Vendor3GPP:
-				info.MMENumber = NormalizeE164Address(string(child.Data))
+				// TBCD string (TS 29.272 §7.3.157); decoded strictly, since a
+				// prefix can't be told apart from digits reliably.
+				info.MMENumber = decodeTBCD(child.Data)
 			case child.Code == dcodec.CodeMMERealm && child.VendorID == dcodec.Vendor3GPP:
 				info.MMERealm = string(child.Data)
 			}

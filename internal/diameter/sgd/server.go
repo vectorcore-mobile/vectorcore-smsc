@@ -52,6 +52,7 @@ type Server struct {
 	localFQDN      string
 	localRealm     string
 	scAddrEncoding string
+	msisdnEncoding sgdcodec.MSISDNEncoding
 	tfaTimeout     time.Duration
 	onMsg          OnMessageFunc
 	onAlertSC      OnAlertServiceCentreFunc
@@ -146,6 +147,7 @@ func NewServer(transport, listenAddr, localFQDN, localRealm, scAddrEncoding stri
 		localFQDN:      localFQDN,
 		localRealm:     localRealm,
 		scAddrEncoding: scAddrEncoding,
+		msisdnEncoding: sgdcodec.MSISDNEncodingTBCD,
 		tfaTimeout:     DefaultTFATimeout,
 		onMsg:          onMsg,
 		peers:          make(map[string]*diameter.Peer),
@@ -334,6 +336,20 @@ func (s *Server) SetTFATimeout(d time.Duration) {
 	s.mu.Lock()
 	s.tfaTimeout = d
 	s.mu.Unlock()
+}
+
+// SetMSISDNEncoding sets the wire format of SGd MSISDN AVPs: "tbcd"
+// (TS 29.329, default) or "legacy_prefixed" for peers that send len|NOA|TBCD.
+func (s *Server) SetMSISDNEncoding(v string) {
+	s.mu.Lock()
+	s.msisdnEncoding = sgdcodec.NormalizeMSISDNEncoding(v)
+	s.mu.Unlock()
+}
+
+func (s *Server) addressOptions() sgdcodec.AddressOptions {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return sgdcodec.AddressOptions{MSISDN: s.msisdnEncoding, SCAddress: s.scAddrEncoding}
 }
 
 // SetOnAlertServiceCentre sets the callback for inbound SGd ALR requests.
@@ -535,7 +551,7 @@ func (s *Server) CompleteMO(messageID string, rpBody []byte) bool {
 }
 
 func (s *Server) handleMOForwardRequest(p *diameter.Peer, req *dcodec.Message) {
-	msg, err := sgdcodec.DecodeTFR(req)
+	msg, err := sgdcodec.DecodeTFRWith(req, s.addressOptions())
 	if err != nil {
 		slog.Error("sgd TFR decode failed", "peer", p.RemoteFQDN, "err", err)
 		sendAnswer(p, req, dcodec.DiameterUnableToComply)
@@ -732,7 +748,7 @@ func (s *Server) dispatch(p *diameter.Peer, msg *dcodec.Message) {
 
 	switch {
 	case cmd == dcodec.CmdMTForwardShortMessage && isReq:
-		HandleOFR(p, msg, s.onMsg)
+		HandleOFR(p, msg, s.onMsg, s.addressOptions())
 	case cmd == dcodec.CmdMTForwardShortMessage && !isReq:
 		s.mu.RLock()
 		ch := s.pendingOFR[msg.Header.HopByHop]

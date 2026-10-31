@@ -20,6 +20,7 @@ func TestBuildAlertSCRequestIncludesRequiredAVPs(t *testing.T) {
 		"3342012832",
 		"+15550000000",
 		"tbcd",
+		sgdcodec.MSISDNEncodingTBCD,
 	)
 
 	if !msg.IsRequest() {

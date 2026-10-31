@@ -10,8 +10,8 @@ import (
 
 // HandleOFR processes an MO-Forward-Short-Message-Request from the MME.
 // It decodes the SM-RP-UI, fires the OnMessage callback, and returns OFA.
-func HandleOFR(p *diameter.Peer, req *dcodec.Message, onMsg OnMessageFunc) {
-	msg, err := sgdcodec.DecodeOFR(req)
+func HandleOFR(p *diameter.Peer, req *dcodec.Message, onMsg OnMessageFunc, opts sgdcodec.AddressOptions) {
+	msg, err := sgdcodec.DecodeOFRWith(req, opts)
 	if err != nil {
 		slog.Error("sgd OFR decode failed", "peer", p.RemoteFQDN, "err", err)
 		sendAnswer(p, req, dcodec.DiameterUnableToComply)

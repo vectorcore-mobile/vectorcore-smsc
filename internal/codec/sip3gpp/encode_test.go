@@ -3,6 +3,7 @@ package sip3gpp
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"github.com/svinson1121/vectorcore-smsc/internal/codec"
 	"github.com/svinson1121/vectorcore-smsc/internal/codec/tpdu"
@@ -82,5 +83,27 @@ func TestEncodeCarriesRawTPDUInRPUserData(t *testing.T) {
 	rpUD := body[len(body)-len(raw)-1:]
 	if int(rpUD[0]) != len(raw) || !bytes.Equal(rpUD[1:], raw) {
 		t.Fatalf("RP-UD = % X, want len %d + % X", rpUD, len(raw), raw)
+	}
+}
+
+func rpData(rpMTI byte, tpData []byte) []byte {
+	// RP-MTI, RP-MR, empty RP-OA, empty RP-DA, RP-UD
+	return append([]byte{rpMTI, 0x05, 0x00, 0x00, byte(len(tpData))}, tpData...)
+}
+
+func TestDecodeRPDataUsesDirectionForTPMTI(t *testing.T) {
+	command := []byte{0x02, 0x07, 0x00, 0x00, 0x2A, 0x0C, 0x91, 0x89, 0x19, 0x00, 0x00, 0x10, 0x11, 0x00}
+	if msg, err := Decode(rpData(rpMTIDataMStoSC, command)); err == nil {
+		t.Fatalf("MO RP-DATA with SMS-COMMAND decoded as %+v, want rejection", msg)
+	}
+
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	report, err := tpdu.EncodeStatusReport(0x2A, codec.Address{MSISDN: "989100000111"}, now, now, tpdu.STReceivedBySME)
+	if err != nil {
+		t.Fatalf("EncodeStatusReport() error = %v", err)
+	}
+	msg, err := Decode(rpData(rpMTIDataSCtoMS, report))
+	if err != nil || msg.TPMR != 0x2A || msg.TPStatus != tpdu.STReceivedBySME {
+		t.Fatalf("MT RP-DATA with SMS-STATUS-REPORT = %+v, %v", msg, err)
 	}
 }

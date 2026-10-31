@@ -57,27 +57,8 @@ func authSessionStateFromRequest(req *dcodec.Message) *dcodec.AVP {
 	return dcodec.NewUint32(dcodec.CodeAuthSessionState, 0, dcodec.FlagMandatory, dcodec.AuthSessionStateNoStateMaintained)
 }
 
-// encodeBCDMSISDN and encodeSCAddress are re-exported from codec/sgd for use
-// within this package without a cross-import.
-
-func encodeBCDMSISDN(msisdn string) []byte {
-	international := false
-	if len(msisdn) > 0 && msisdn[0] == '+' {
-		international = true
-		msisdn = msisdn[1:]
-	}
-	noa := byte(0x81)
-	if international {
-		noa = 0x91
-	}
-	digits := encodeBCDDigits(msisdn)
-	result := make([]byte, 2+len(digits))
-	result[0] = byte(1 + len(digits))
-	result[1] = noa
-	copy(result[2:], digits)
-	return result
-}
-
+// encodeSCAddress mirrors codec/sgd's SC-Address encoder for use within
+// this package.
 func encodeSCAddress(sc, encoding string) []byte {
 	if sc == "" {
 		return nil

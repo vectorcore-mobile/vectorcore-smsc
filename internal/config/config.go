@@ -35,6 +35,7 @@ type SMSCConfig struct {
 	SGdSCAddressEncoding string        `yaml:"sgd_sc_address_encoding"` // tbcd | ascii_digits
 	MaxQueueLifetime     time.Duration `yaml:"max_queue_lifetime"`      // global max queued/waiting lifetime
 	SGdTFATimeout        time.Duration `yaml:"sgd_tfa_timeout"`         // wait for MT-Forward answer (TFA) from the MME
+	SGdMSISDNEncoding    string        `yaml:"sgd_msisdn_encoding"`     // tbcd (TS 29.329) | legacy_prefixed
 }
 
 type NumberingConfig struct {
@@ -131,6 +132,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.SMSC.MaxQueueLifetime == 0 {
 		c.SMSC.MaxQueueLifetime = 7 * 24 * time.Hour
+	}
+	if c.SMSC.SGdMSISDNEncoding == "" {
+		c.SMSC.SGdMSISDNEncoding = "tbcd"
 	}
 	if c.SMSC.SGdTFATimeout <= 0 {
 		c.SMSC.SGdTFATimeout = 40 * time.Second // keep above the MME's SMS transaction timeout

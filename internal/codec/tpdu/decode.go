@@ -16,8 +16,10 @@ const (
 	mtiSMSCommand      = 0x02 // same value, direction-dependent
 )
 
-// Decode parses raw TP-DATA bytes into a canonical Message.
-// It handles SMS-SUBMIT (MO from UE) and SMS-DELIVER (MT to UE).
+// Decode parses raw TP-DATA bytes into a canonical Message when the
+// direction is unknown. TP-MTI 0x02 is taken as SMS-STATUS-REPORT; prefer
+// DecodeMO / DecodeMT when the direction is known, since 0x02 from a mobile
+// station is SMS-COMMAND.
 func Decode(data []byte) (*codec.Message, error) {
 	if len(data) < 2 {
 		return nil, fmt.Errorf("tpdu too short: %d bytes", len(data))
@@ -33,6 +35,45 @@ func Decode(data []byte) (*codec.Message, error) {
 		return decodeStatusReport(data)
 	default:
 		return nil, fmt.Errorf("unsupported TP-MTI: 0x%02X", mti)
+	}
+}
+
+// DecodeMO parses TP-DATA sent by a mobile station (MS→SC). The meaning of
+// TP-MTI depends on direction (TS 23.040 §9.2.3.1): in this direction 0x01
+// is SMS-SUBMIT, 0x02 is SMS-COMMAND (not a status report) and 0x00 is
+// SMS-DELIVER-REPORT. Only SMS-SUBMIT carries a short message to route.
+func DecodeMO(data []byte) (*codec.Message, error) {
+	if len(data) < 2 {
+		return nil, fmt.Errorf("tpdu too short: %d bytes", len(data))
+	}
+	switch data[0] & 0x03 {
+	case mtiSMSSubmit:
+		return decodeSubmit(data)
+	case mtiSMSCommand:
+		return nil, fmt.Errorf("SMS-COMMAND (MO TP-MTI 0x02) is not supported")
+	case mtiSMSDeliver:
+		return nil, fmt.Errorf("unexpected SMS-DELIVER-REPORT (MO TP-MTI 0x00) where a short message was expected")
+	default:
+		return nil, fmt.Errorf("reserved MO TP-MTI 0x%02X", data[0]&0x03)
+	}
+}
+
+// DecodeMT parses TP-DATA sent to a mobile station (SC→MS): 0x00 is
+// SMS-DELIVER and 0x02 is SMS-STATUS-REPORT. 0x01 (SMS-SUBMIT-REPORT) is not
+// a short message.
+func DecodeMT(data []byte) (*codec.Message, error) {
+	if len(data) < 2 {
+		return nil, fmt.Errorf("tpdu too short: %d bytes", len(data))
+	}
+	switch data[0] & 0x03 {
+	case mtiSMSDeliver:
+		return decodeDeliver(data)
+	case mtiSMSStatusReport:
+		return decodeStatusReport(data)
+	case mtiSMSSubmit:
+		return nil, fmt.Errorf("unexpected SMS-SUBMIT-REPORT (MT TP-MTI 0x01) where a short message was expected")
+	default:
+		return nil, fmt.Errorf("reserved MT TP-MTI 0x%02X", data[0]&0x03)
 	}
 }
 
