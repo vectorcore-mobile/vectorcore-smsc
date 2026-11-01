@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -11,7 +12,8 @@ import (
 
 // S6cLookup checks the local subscriber cache first. If no usable attached MME
 // is already known, it queries the HSS via SRI-SM, updates the subscriber
-// record, and returns the refreshed state.
+// record, and returns the refreshed state. A user-unknown answer from the HSS
+// is returned as *s6c.ErrUnknownUser, never as the stale cached record.
 func (r *Registry) S6cLookup(ctx context.Context, msisdn string) (*store.Subscriber, error) {
 	sub, err := r.st.GetSubscriber(ctx, msisdn)
 	if err != nil {
@@ -49,7 +51,6 @@ func (r *Registry) S6cLookup(ctx context.Context, msisdn string) (*store.Subscri
 		var unknown *s6c.ErrUnknownUser
 		if isS6cUnknown(err, &unknown) {
 			slog.Debug("registry: S6c lookup unknown subscriber", "msisdn", msisdn)
-			return sub, nil
 		}
 		return nil, err
 	}
@@ -99,9 +100,5 @@ func isS6cUnknown(err error, target **s6c.ErrUnknownUser) bool {
 	if err == nil {
 		return false
 	}
-	if e, ok := err.(*s6c.ErrUnknownUser); ok {
-		*target = e
-		return true
-	}
-	return false
+	return errors.As(err, target)
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/svinson1121/vectorcore-smsc/internal/codec"
 	smppcodec "github.com/svinson1121/vectorcore-smsc/internal/codec/smpp"
 	dcodec "github.com/svinson1121/vectorcore-smsc/internal/diameter/codec"
+	"github.com/svinson1121/vectorcore-smsc/internal/diameter/s6c"
 	diametersgd "github.com/svinson1121/vectorcore-smsc/internal/diameter/sgd"
 	"github.com/svinson1121/vectorcore-smsc/internal/metrics"
 	"github.com/svinson1121/vectorcore-smsc/internal/numbering"
@@ -232,6 +233,11 @@ func (f *Forwarder) runRoutingPass(ctx context.Context, msg *codec.Message, star
 	var sawRetry bool
 	var sawPermanent bool
 	var sawBusy bool
+	// The IMS candidates (0, 1) being unavailable is retryable, since the
+	// subscriber may register later, unless the HSS doesn't know the
+	// subscriber at all, which rules out IMS as well.
+	var sawIMSUnavailable bool
+	var sawUnknownSubscriber bool
 	var lastErr error
 	var lastAttempted *selectedRoute
 
@@ -248,7 +254,16 @@ func (f *Forwarder) runRoutingPass(ctx context.Context, msg *codec.Message, star
 				lastAttempted = planned
 				lastErr = errors.New(reason)
 			}
-			sawRetry = true
+			switch {
+			case reason == sgdReasonUnknownSubscriber:
+				// Definitive for SGd: try the next route, but don't retry this one.
+				sawPermanent = true
+				sawUnknownSubscriber = true
+			case routeIndex < 2:
+				sawIMSUnavailable = true
+			default:
+				sawRetry = true
+			}
 			continue
 		}
 
@@ -271,7 +286,7 @@ func (f *Forwarder) runRoutingPass(ctx context.Context, msg *codec.Message, star
 			}
 		case routeOutcomeWaitEvent:
 			pass := passOutcomeWaitEvent
-			if sawRetry || sawPermanent {
+			if sawRetry || sawPermanent || sawIMSUnavailable {
 				pass = passOutcomeWaitTimerEvent
 			}
 			return routingPassResult{
@@ -306,6 +321,9 @@ func (f *Forwarder) runRoutingPass(ctx context.Context, msg *codec.Message, star
 		}
 	}
 
+	if sawIMSUnavailable && !sawUnknownSubscriber {
+		sawRetry = true
+	}
 	switch {
 	case sawRetry:
 		result := routingPassResult{
@@ -895,12 +913,22 @@ func modulo(v, size int) int {
 	return v
 }
 
+// sgdReasonUnknownSubscriber is the candidate-skip reason when the HSS
+// answers SRI-SM with user-unknown (Experimental-Result 5001). Unlike other
+// S6c failures it is definitive: the SGd route is not retried, and the
+// message fails unless another route delivers it.
+const sgdReasonUnknownSubscriber = "S6c: subscriber unknown to the HSS"
+
 func (f *Forwarder) resolveSGdTarget(ctx context.Context, msisdn string) (string, string, string, string) {
 	if f.sgdSender == nil {
 		return "", "", "", "SGd sender not configured"
 	}
 	s6cSub, s6cErr := f.reg.S6cLookup(ctx, msisdn)
 	if s6cErr != nil {
+		var unknown *s6c.ErrUnknownUser
+		if errors.As(s6cErr, &unknown) {
+			return "", "", "", sgdReasonUnknownSubscriber
+		}
 		return "", "", "", fmt.Sprintf("S6c lookup failed: %v", s6cErr)
 	}
 	if s6cSub == nil || !s6cSub.LTEAttached || s6cSub.MMEHost == "" {

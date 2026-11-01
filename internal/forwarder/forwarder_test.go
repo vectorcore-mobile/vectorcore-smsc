@@ -1602,3 +1602,95 @@ func TestDeliverSGdSerialisesPerDestination(t *testing.T) {
 		t.Errorf("max concurrent MT overall = %d, want different destinations in parallel", sender.maxTotal)
 	}
 }
+
+// The HSS answering SRI-SM with user-unknown is definitive: the message fails
+// at once (no retries, no SGd attempt) instead of waiting out its lifetime,
+// and a stale cached serving MME is never used.
+func TestDispatchFailsWhenHSSReportsUnknownSubscriber(t *testing.T) {
+	st := &forwarderTestStore{
+		subscriber: &store.Subscriber{
+			MSISDN:      "989100000111",
+			IMSI:        "432600000000111",
+			LTEAttached: true,
+			MMEHost:     "stale-mme.epc.example.net",
+			MMENumber:   "15550000002",
+			UpdatedAt:   time.Now().Add(-time.Hour), // older than the S6c cache TTL
+		},
+	}
+	reg := newTestRegistry(t, st)
+	reg.SetS6cClient(&fakeS6cClient{err: &s6c.ErrUnknownUser{}})
+	sgd := &fakeSGdSender{}
+	rep := &captureReporter{}
+	f := New(Config{
+		Registry:         reg,
+		Engine:           routing.NewEngine(),
+		Store:            st,
+		SGdSender:        sgd,
+		Reporter:         rep,
+		MaxQueueLifetime: time.Hour,
+	})
+	f.Dispatch(context.Background(), &codec.Message{
+		ID:               "m-unknown",
+		IngressInterface: codec.InterfaceSMPP,
+		Source:           codec.Address{MSISDN: "3342012832"},
+		Destination:      codec.Address{MSISDN: "989100000111"},
+	})
+
+	if sgd.lastMsg != nil {
+		t.Fatalf("SGd send to %q, want none for an unknown subscriber", sgd.lastMME)
+	}
+	if n := len(st.statusUpdates); n == 0 || st.statusUpdates[n-1] != store.MessageStatusFailed {
+		t.Fatalf("status updates = %v, want final FAILED", st.statusUpdates)
+	}
+	if st.nextRetryAt != nil || st.deferred != nil {
+		t.Fatalf("retry at %v / deferred %+v, want neither", st.nextRetryAt, st.deferred)
+	}
+	if len(rep.reports) != 1 || rep.reports[0] != "FAILED" {
+		t.Fatalf("reports = %v, want [FAILED]", rep.reports)
+	}
+}
+
+// User-unknown only rules out the SGd route: a matching fallback rule (e.g.
+// SMPP/SIP SIMPLE towards another network) is still tried.
+func TestDispatchUnknownSubscriberFallsBackToNextRoute(t *testing.T) {
+	st := &forwarderTestStore{
+		sipPeers: map[string]store.SIPPeer{"simple1": {Name: "simple1"}},
+	}
+	reg := newTestRegistry(t, st)
+	reg.SetS6cClient(&fakeS6cClient{err: &s6c.ErrUnknownUser{}})
+	engine := routing.NewEngine()
+	engine.Reload([]store.RoutingRule{{
+		Name:           "offnet",
+		Priority:       10,
+		MatchSrcIface:  "smpp",
+		MatchDstPrefix: "334",
+		EgressIface:    "sipsimple",
+		EgressPeer:     "simple1",
+	}})
+	sgd := &fakeSGdSender{}
+	simple := &fakeSimpleSender{}
+	f := New(Config{
+		Registry:         reg,
+		Engine:           engine,
+		Store:            st,
+		SGdSender:        sgd,
+		SimpleSender:     simple,
+		MaxQueueLifetime: time.Hour,
+	})
+	f.Dispatch(context.Background(), &codec.Message{
+		ID:               "m-offnet",
+		IngressInterface: codec.InterfaceSMPP,
+		Source:           codec.Address{MSISDN: "3342012832"},
+		Destination:      codec.Address{MSISDN: "3342012860"},
+	})
+
+	if sgd.lastMsg != nil {
+		t.Fatal("unexpected SGd send")
+	}
+	if simple.calls != 1 {
+		t.Fatalf("SIP SIMPLE sends = %d, want 1", simple.calls)
+	}
+	if n := len(st.statusUpdates); n == 0 || st.statusUpdates[n-1] != store.MessageStatusDelivered {
+		t.Fatalf("status updates = %v, want final DELIVERED", st.statusUpdates)
+	}
+}

@@ -994,9 +994,8 @@ func TestSGdStatusReportCarriesRejectionCause(t *testing.T) {
 }
 
 // If the HSS no longer knows the original sender when its status report is
-// sent, the report is not delivered anywhere and does not generate further
-// traffic; the original message is unaffected. The report is held like any
-// MT whose S6c lookup failed (WAIT_TIMER, deferred_reason sgd_lookup).
+// sent, the report fails at once: it is not retried, does not generate
+// further traffic, and the original message is unaffected.
 func TestSGdStatusReportSenderUnknownToHSS(t *testing.T) {
 	h := startHarness(t)
 	h.hss.remove(senderMSISDN)
@@ -1013,7 +1012,10 @@ func TestSGdStatusReportSenderUnknownToHSS(t *testing.T) {
 	if len(reports) != 1 {
 		t.Fatalf("status report rows = %d, want 1", len(reports))
 	}
-	if sr := reports[0]; sr.Status != store.MessageStatusWaitTimer || sr.DeferredReason != "sgd_lookup" {
-		t.Fatalf("status report = status %s deferred_reason %q, want WAIT_TIMER / sgd_lookup", sr.Status, sr.DeferredReason)
+	if sr := reports[0]; sr.Status != store.MessageStatusFailed || sr.NextRetryAt != nil {
+		t.Fatalf("status report = status %s next_retry %v, want FAILED with no retry", sr.Status, sr.NextRetryAt)
+	}
+	if got := h.hss.lookupCount(senderMSISDN); got != 1 {
+		t.Fatalf("S6c lookups of the sender = %d, want 1", got)
 	}
 }
