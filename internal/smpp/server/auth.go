@@ -14,9 +14,9 @@ import (
 
 // AuthResult is returned by Authenticator.Authenticate.
 type AuthResult struct {
-	Account  store.SMPPServerAccount
-	Allowed  bool
-	Reason   string
+	Account store.SMPPServerAccount
+	Allowed bool
+	Reason  string
 }
 
 // Authenticator validates SMPP bind credentials against the database.

@@ -17,8 +17,8 @@ import (
 
 // Decision is the result of a routing evaluation.
 type Decision struct {
-	RuleName     string
-	Priority     int
+	RuleName    string
+	Priority    int
 	EgressIface string // sip3gpp | sipsimple | smpp | sgd
 	EgressPeer  string // peer name / system_id (empty = use default)
 	SFPolicyID  string // SF policy to apply on failure (empty = no SF)

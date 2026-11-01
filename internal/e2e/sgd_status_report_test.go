@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/svinson1121/vectorcore-smsc/internal/codec"
+	"github.com/svinson1121/vectorcore-smsc/internal/codec/sip3gpp"
 	"github.com/svinson1121/vectorcore-smsc/internal/codec/tpdu"
 	"github.com/svinson1121/vectorcore-smsc/internal/diameter"
 	dcodec "github.com/svinson1121/vectorcore-smsc/internal/diameter/codec"
@@ -81,6 +82,13 @@ func (h *fakeHSS) ReportDelivery(msisdn, _, _, _ string, cause uint32, _ *uint32
 	defer h.mu.Unlock()
 	h.rsds[msisdn] = append(h.rsds[msisdn], cause)
 	return &s6cdiam.ReportDeliveryResult{ResultCode: dcodec.DiameterSuccess}, nil
+}
+
+// remove makes the HSS answer user-unknown for msisdn from now on.
+func (h *fakeHSS) remove(msisdn string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.subs, msisdn)
 }
 
 func (h *fakeHSS) lookupCount(msisdn string) int {
@@ -351,6 +359,8 @@ func (m *fakeMME) encodeMSISDN(msisdn string) []byte {
 // ── SMSC under test ──────────────────────────────────────────────────────────
 
 type harness struct {
+	ctx  context.Context
+	fwd  *forwarder.Forwarder
 	st   *sqlite.DB
 	hss  *fakeHSS
 	mmeA *fakeMME
@@ -423,6 +433,8 @@ func startHarnessWith(t *testing.T, opts harnessOptions) *harness {
 	go func() { _ = srv.ListenAndServe(ctx) }()
 
 	h := &harness{
+		ctx:  ctx,
+		fwd:  fwd,
 		st:   st,
 		hss:  hss,
 		mmeA: startFakeMME(ctx, t, mmeAHost, port),
@@ -908,5 +920,100 @@ func TestSGdLegacyPrefixedMSISDNPeer(t *testing.T) {
 	}
 	if got := userName(t, h.mmeA.nextTFR(t)); got != senderIMSI {
 		t.Fatalf("status report User-Name = %q, want %s", got, senderIMSI)
+	}
+}
+
+// A handset-originated SM over IMS (ISC, RP-DATA in a SIP MESSAGE) with
+// TP-SRR set gets its SMS-STATUS-REPORT like an SGd-originated one. Neither
+// party is IMS-registered here, so both MT legs go out over SGd.
+func TestIMSOriginatedStatusReportDelivered(t *testing.T) {
+	h := startHarness(t)
+
+	submit := submitTo(destMSISDN, 0x61, true)
+	body, err := sip3gpp.EncodeMO(submit, 0x07, scAddr)
+	if err != nil {
+		t.Fatalf("sip3gpp.EncodeMO() error = %v", err)
+	}
+	// What the ISC handler does with the MESSAGE body.
+	msg, err := sip3gpp.Decode(body)
+	if err != nil || msg == nil {
+		t.Fatalf("sip3gpp.Decode() = %v, %v", msg, err)
+	}
+	msg.IngressInterface = codec.InterfaceSIP3GPP
+	msg.IngressPeer = "scscf.ims.example.net"
+	msg.Source.MSISDN = senderMSISDN // from P-Asserted-Identity
+	if msg.TPMR != 0x61 || !msg.TPSRRequired {
+		t.Fatalf("decoded SUBMIT = TP-MR 0x%02X SRR %v, want 0x61 / true", msg.TPMR, msg.TPSRRequired)
+	}
+	go h.fwd.Dispatch(h.ctx, msg)
+
+	h.mmeB.nextTFR(t)
+	reportReq := h.mmeA.nextTFR(t)
+	if got := userName(t, reportReq); got != senderIMSI {
+		t.Fatalf("status report User-Name = %q, want sender IMSI %s", got, senderIMSI)
+	}
+	report, err := tpdu.Decode(smRPUI(t, reportReq))
+	if err != nil {
+		t.Fatalf("decode SMS-STATUS-REPORT: %v", err)
+	}
+	if report.TPMR != 0x61 || report.Source.MSISDN != destMSISDN || report.TPStatus != tpdu.STReceivedBySME {
+		t.Fatalf("status report = TP-MR 0x%02X RA %q ST 0x%02X, want 0x61 / %s / 0x00",
+			report.TPMR, report.Source.MSISDN, report.TPStatus, destMSISDN)
+	}
+
+	orig := h.waitForStatus(t, store.MessageKindSM, store.MessageStatusDelivered, 1)[0]
+	if orig.OriginIface != string(codec.InterfaceSIP3GPP) || orig.TPMR == nil || *orig.TPMR != 0x61 {
+		t.Fatalf("original row = origin %q TP-MR %v, want sip3gpp / 0x61", orig.OriginIface, orig.TPMR)
+	}
+	sr := h.waitForStatus(t, store.MessageKindStatusReport, store.MessageStatusDelivered, 1)[0]
+	if sr.RefMessageID != orig.ID {
+		t.Fatalf("status report ref_message_id = %q, want %q", sr.RefMessageID, orig.ID)
+	}
+	h.mmeA.expectNoTFR(t, 300*time.Millisecond)
+}
+
+// When the destination's handset refuses the SM outright, the sender's
+// status report says why (TP-ST from the MT-Forward failure cause) rather
+// than a generic "not obtainable".
+func TestSGdStatusReportCarriesRejectionCause(t *testing.T) {
+	h := startHarness(t)
+	h.mmeB.setExperimental(sgdsrv.ResultErrorIllegalEquipment, nil)
+
+	h.mmeA.sendMO(t, submitTo(destMSISDN, 0x62, true))
+	h.mmeB.nextTFR(t)
+	report, err := tpdu.Decode(smRPUI(t, h.mmeA.nextTFR(t)))
+	if err != nil {
+		t.Fatalf("decode SMS-STATUS-REPORT: %v", err)
+	}
+	if report.TPMR != 0x62 || report.TPStatus != tpdu.STPermIncompatibleDestination {
+		t.Fatalf("status report = TP-MR 0x%02X ST 0x%02X, want 0x62 / 0x41 (incompatible destination)",
+			report.TPMR, report.TPStatus)
+	}
+	h.waitForStatus(t, store.MessageKindSM, store.MessageStatusFailed, 1)
+	h.waitForStatus(t, store.MessageKindStatusReport, store.MessageStatusDelivered, 1)
+}
+
+// If the HSS no longer knows the original sender when its status report is
+// sent, the report is not delivered anywhere and does not generate further
+// traffic; the original message is unaffected. The report is held like any
+// MT whose S6c lookup failed (WAIT_TIMER, deferred_reason sgd_lookup).
+func TestSGdStatusReportSenderUnknownToHSS(t *testing.T) {
+	h := startHarness(t)
+	h.hss.remove(senderMSISDN)
+
+	h.mmeA.sendMO(t, submitTo(destMSISDN, 0x63, true))
+	h.mmeB.nextTFR(t)
+	h.waitForStatus(t, store.MessageKindSM, store.MessageStatusDelivered, 1)
+
+	waitFor(t, "S6c lookup of the sender", func() bool { return h.hss.lookupCount(senderMSISDN) > 0 })
+	h.mmeA.expectNoTFR(t, 500*time.Millisecond)
+	h.mmeB.expectNoTFR(t, 0)
+
+	reports := h.messagesOfKind(t, store.MessageKindStatusReport)
+	if len(reports) != 1 {
+		t.Fatalf("status report rows = %d, want 1", len(reports))
+	}
+	if sr := reports[0]; sr.Status != store.MessageStatusWaitTimer || sr.DeferredReason != "sgd_lookup" {
+		t.Fatalf("status report = status %s deferred_reason %q, want WAIT_TIMER / sgd_lookup", sr.Status, sr.DeferredReason)
 	}
 }

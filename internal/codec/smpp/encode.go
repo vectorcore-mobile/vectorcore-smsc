@@ -30,19 +30,19 @@ func EncodeDeliveryReceipt(origMsgID, srcAddr, dstAddr, status, errCode string) 
 		origMsgID, status, errCode)
 
 	pdu := &smpp.PDU{
-		CommandID:       smpp.CmdDeliverSM,
-		CommandStatus:   smpp.ESME_ROK,
-		ServiceType:     "",
-		SourceAddrTON:   0x01,
-		SourceAddrNPI:   0x01,
-		SourceAddr:      srcAddr,
-		DestAddrTON:     0x01,
-		DestAddrNPI:     0x01,
-		DestinationAddr: dstAddr,
-		ESMClass:        smpp.ESMClassDeliverReceipt,
+		CommandID:          smpp.CmdDeliverSM,
+		CommandStatus:      smpp.ESME_ROK,
+		ServiceType:        "",
+		SourceAddrTON:      0x01,
+		SourceAddrNPI:      0x01,
+		SourceAddr:         srcAddr,
+		DestAddrTON:        0x01,
+		DestAddrNPI:        0x01,
+		DestinationAddr:    dstAddr,
+		ESMClass:           smpp.ESMClassDeliverReceipt,
 		RegisteredDelivery: 0x00,
-		DataCoding:      0x00,
-		ShortMessage:    []byte(body),
+		DataCoding:         0x00,
+		ShortMessage:       []byte(body),
 	}
 	pdu.SMLength = byte(len(pdu.ShortMessage))
 	pdu.SetTLVString(smpp.TLVReceiptedMessageID, origMsgID)

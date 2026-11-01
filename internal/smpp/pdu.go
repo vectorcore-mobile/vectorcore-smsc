@@ -63,7 +63,7 @@ const (
 
 // ESMClass bit flags (bits 6 = UDHI, bits 2-0 = message type).
 const (
-	ESMClassUDHI        byte = 0x40 // UDH indicator
+	ESMClassUDHI           byte = 0x40 // UDH indicator
 	ESMClassDeliverReceipt byte = 0x04 // this is a delivery receipt
 )
 

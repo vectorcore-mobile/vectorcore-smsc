@@ -21,7 +21,7 @@ type notifier struct {
 
 	mu   sync.Mutex
 	subs map[string][]chan<- ChangeEvent // table → subscriber channels
-	seen map[string]string              // table → last seen updated_at (ISO8601)
+	seen map[string]string               // table → last seen updated_at (ISO8601)
 
 	stopCh chan struct{}
 	once   sync.Once

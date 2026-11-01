@@ -9,10 +9,10 @@ import (
 
 // IMDNStatus values per RFC 5438 §7.2.
 const (
-	IMDNDelivered  = "delivered"
-	IMDNFailed     = "failed"
-	IMDNProcessed  = "processed"
-	IMDNDisplayed  = "displayed"
+	IMDNDelivered = "delivered"
+	IMDNFailed    = "failed"
+	IMDNProcessed = "processed"
+	IMDNDisplayed = "displayed"
 )
 
 // IMDNBody generates a message/imdn+xml body per RFC 5438.

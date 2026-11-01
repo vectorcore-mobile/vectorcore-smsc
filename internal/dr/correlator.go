@@ -73,6 +73,17 @@ const (
 // Report records a delivery report for the given message and, if the origin
 // interface supports it, sends the DR back to the originating peer.
 func (c *Correlator) Report(ctx context.Context, m store.Message, status string) {
+	c.report(ctx, m, status, nil)
+}
+
+// ReportFailure is Report for a failed message whose cause is known:
+// tpStatus is used as the TP-ST of the SMS-STATUS-REPORT instead of the
+// generic value for status.
+func (c *Correlator) ReportFailure(ctx context.Context, m store.Message, status string, tpStatus byte) {
+	c.report(ctx, m, status, &tpStatus)
+}
+
+func (c *Correlator) report(ctx context.Context, m store.Message, status string, tpStatus *byte) {
 	dr := store.DeliveryReport{
 		ID:          newUUID(),
 		MessageID:   m.ID,
@@ -103,7 +114,7 @@ func (c *Correlator) Report(ctx context.Context, m store.Message, status string)
 	case "smpp":
 		c.reportSMPP(ctx, m, status)
 	case "sgd", "sip3gpp":
-		c.reportStatusReport(ctx, m, status)
+		c.reportStatusReport(ctx, m, status, tpStatus)
 	default:
 		// SIP SIMPLE IMDN generation is not implemented; log only.
 		slog.Info("correlator: DR recorded",
@@ -189,7 +200,8 @@ func s6cCauseForStatus(status string) uint32 {
 // to the original sender. The report is routed like any MT (fresh S6c lookup
 // of the sender, store-and-forward, retries) and is independent of the
 // original message's transaction.
-func (c *Correlator) reportStatusReport(ctx context.Context, m store.Message, status string) {
+// tpStatus, when set, overrides the TP-ST derived from status.
+func (c *Correlator) reportStatusReport(ctx context.Context, m store.Message, status string, tpStatus *byte) {
 	if !m.DRRequired {
 		return
 	}
@@ -219,6 +231,9 @@ func (c *Correlator) reportStatusReport(ctx context.Context, m store.Message, st
 		scts = dt
 	}
 	st := tpStatusForDR(status)
+	if tpStatus != nil {
+		st = *tpStatus
+	}
 	mr := byte(*m.TPMR)
 
 	tpData, err := tpdu.EncodeStatusReport(mr, codec.Address{MSISDN: m.DstMSISDN}, scts, dt, st)

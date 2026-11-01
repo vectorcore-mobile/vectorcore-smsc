@@ -442,11 +442,7 @@ func (f *Forwarder) finalizeRoutingPass(ctx context.Context, msg *codec.Message,
 			"err", result.lastErr,
 		)
 		_ = f.st.UpdateMessageStatus(ctx, msg.ID, store.MessageStatusFailed)
-		if f.reporter != nil {
-			if stored, err := f.st.GetMessage(ctx, msg.ID); err == nil && stored != nil {
-				f.reporter.Report(ctx, *stored, "FAILED")
-			}
-		}
+		f.reportFailed(ctx, msg.ID, result.lastErr)
 	}
 }
 

@@ -120,6 +120,34 @@ func TestSaveMessageRoundTripsSMPPRegisteredDelivery(t *testing.T) {
 	}
 }
 
+// Rows written by older versions can hold NULL in text columns; reading
+// them must not fail (which would break every list query that includes them).
+func TestGetMessageReadsNullTextColumns(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, filepath.Join(t.TempDir(), "smsc.db"), time.Hour)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.db.ExecContext(ctx,
+		`INSERT INTO messages (id, origin_iface, status, submitted_at) VALUES ('nulls-1', 'smpp', 'QUEUED', ?)`,
+		time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("insert row: %v", err)
+	}
+	got, err := db.GetMessage(ctx, "nulls-1")
+	if err != nil || got == nil {
+		t.Fatalf("GetMessage(nulls-1) = %v, %v", got, err)
+	}
+	if got.SMPPMsgID != "" || got.OriginPeer != "" || got.EgressIface != "" || got.DstMSISDN != "" || got.DeferredReason != "" {
+		t.Fatalf("NULL columns read as %+v, want empty strings", got)
+	}
+	msgs, err := db.ListMessages(ctx, 10)
+	if err != nil || len(msgs) != 1 {
+		t.Fatalf("ListMessages() = %d rows, %v; want 1 row", len(msgs), err)
+	}
+}
+
 // An existing database created before the kind/ref_message_id/raw_tpdu
 // columns must be upgraded in place by Open, with old rows read as "sm".
 func TestOpenUpgradesLegacyMessagesTable(t *testing.T) {

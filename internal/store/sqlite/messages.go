@@ -239,11 +239,15 @@ func sqliteScanMessages(db *DB, ctx context.Context, q string, args ...any) ([]s
 		var encoding *int
 		var dcs *int
 		var kind, refMessageID *string
+		// Nullable text columns: rows written by older versions, or columns
+		// added to an existing table, can hold NULL.
+		var smppMsgID, originPeer, egressIface, egressPeer, srcMSISDN, dstMSISDN *string
+		var alertCorrelationID, deferredReason, deferredInterface, servingNodeAtDeferral *string
 
 		err := rows.Scan(
-			&m.ID, &tpmr, &m.SMPPMsgID, &m.OriginIface, &m.OriginPeer,
-			&m.EgressIface, &m.EgressPeer, &m.RouteCursor, &m.SrcMSISDN, &m.DstMSISDN,
-			&m.AlertCorrelationID, &m.DeferredReason, &m.DeferredInterface, &m.ServingNodeAtDeferral,
+			&m.ID, &tpmr, &smppMsgID, &m.OriginIface, &originPeer,
+			&egressIface, &egressPeer, &m.RouteCursor, &srcMSISDN, &dstMSISDN,
+			&alertCorrelationID, &deferredReason, &deferredInterface, &servingNodeAtDeferral,
 			&m.Payload, &m.UDH, &encoding, &dcs, &m.Status,
 			&m.RetryCount, &nextRetryStr,
 			&drInt, &submittedStr, &expiryStr,
@@ -253,6 +257,16 @@ func sqliteScanMessages(db *DB, ctx context.Context, q string, args ...any) ([]s
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		m.TPMR = tpmr
+		m.SMPPMsgID = derefString(smppMsgID)
+		m.OriginPeer = derefString(originPeer)
+		m.EgressIface = derefString(egressIface)
+		m.EgressPeer = derefString(egressPeer)
+		m.SrcMSISDN = derefString(srcMSISDN)
+		m.DstMSISDN = derefString(dstMSISDN)
+		m.AlertCorrelationID = derefString(alertCorrelationID)
+		m.DeferredReason = derefString(deferredReason)
+		m.DeferredInterface = derefString(deferredInterface)
+		m.ServingNodeAtDeferral = derefString(servingNodeAtDeferral)
 		if encoding != nil {
 			m.Encoding = *encoding
 		}
@@ -443,6 +457,14 @@ func nullableString(v string) any {
 		return nil
 	}
 	return v
+}
+
+// derefString reads a nullable text column, mapping NULL to "".
+func derefString(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
 }
 
 // nullableTime converts a *time.Time to a string for SQLite, or nil.

@@ -122,7 +122,7 @@ func (r *RetryScheduler) finalizeNonDelivered(ctx context.Context, m store.Messa
 				slog.Error("retry: update busy retry failed", "id", m.ID, "err", err)
 			}
 		} else {
-			r.scheduleOrFail(ctx, m, result.lastAttempted)
+			r.scheduleOrFail(ctx, m, result.lastAttempted, result.lastErr)
 		}
 		// An alert-triggered retry that finds the subscriber absent again is
 		// returned as a timer wait; the HSS cleared its MWD on the alert, so
@@ -140,7 +140,7 @@ func (r *RetryScheduler) finalizeNonDelivered(ctx context.Context, m store.Messa
 	case passOutcomeWaitTimerEvent:
 		r.f.markDeferred(ctx, m.ID, msg, m.RouteCursor, result.eventRoute)
 		r.f.applyDeferredExpiryCap(ctx, m.ID, m.SubmittedAt, result.eventRoute)
-		r.scheduleOrFail(ctx, m, result.eventRoute)
+		r.scheduleOrFail(ctx, m, result.eventRoute, result.lastErr)
 		if err := r.f.st.UpdateMessageStatus(ctx, m.ID, store.MessageStatusWaitTimerEvent); err != nil {
 			slog.Error("retry: mark wait timer-event failed", "id", m.ID, "err", err)
 		}
@@ -148,26 +148,18 @@ func (r *RetryScheduler) finalizeNonDelivered(ctx context.Context, m store.Messa
 	case passOutcomeFailed:
 		slog.Warn("retry: max retries exceeded, marking failed", "id", m.ID, "err", result.lastErr)
 		_ = r.f.st.UpdateMessageStatus(ctx, m.ID, store.MessageStatusFailed)
-		if r.f.reporter != nil {
-			if stored, err := r.f.st.GetMessage(ctx, m.ID); err == nil && stored != nil {
-				r.f.reporter.Report(ctx, *stored, "FAILED")
-			}
-		}
+		r.f.reportFailed(ctx, m.ID, result.lastErr)
 	}
 }
 
-func (r *RetryScheduler) scheduleOrFail(ctx context.Context, m store.Message, route *selectedRoute) {
+func (r *RetryScheduler) scheduleOrFail(ctx context.Context, m store.Message, route *selectedRoute, lastErr error) {
 	// Compute next retry using SF policy if available.
 	next := r.nextRetry(ctx, m, route)
 	if next == nil {
 		// Max retries exceeded or no policy — fail permanently.
-		slog.Warn("retry: max retries exceeded, marking failed", "id", m.ID)
+		slog.Warn("retry: max retries exceeded, marking failed", "id", m.ID, "err", lastErr)
 		_ = r.f.st.UpdateMessageStatus(ctx, m.ID, store.MessageStatusFailed)
-		if r.f.reporter != nil {
-			if stored, err := r.f.st.GetMessage(ctx, m.ID); err == nil && stored != nil {
-				r.f.reporter.Report(ctx, *stored, "FAILED")
-			}
-		}
+		r.f.reportFailed(ctx, m.ID, lastErr)
 		return
 	}
 
